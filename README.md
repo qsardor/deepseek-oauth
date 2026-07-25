@@ -99,10 +99,8 @@ console.log(session.accessToken);
 
 ## Models
 
-- `deepseek-chat`: chat model
-- `deepseek-reasoner`: V4 with reasoning traces (DeepThink)
-
-Set the model to `deepseek-reasoner` to get reasoning traces in the `reasoning_content` delta field.
+- `deepseek-chat`
+- `deepseek-reasoner`
 
 ## Limitations
 
