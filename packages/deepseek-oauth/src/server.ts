@@ -1,10 +1,11 @@
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
-import { createDeepSeekTransport } from "@deepseek-oauth/core";
+import { createDeepSeekTransport, deleteChatSession } from "@deepseek-oauth/core";
 import { LoginRequired, deepSeekCredentials } from "@deepseek-oauth/local";
 import { readBody, sendJson, sendText } from "./shared.js";
 
 const DEBUG = !!process.env.DEBUG_DEEPSEEK;
 const SHUTDOWN_TIMEOUT_MS = 30_000;
+const SESSION_TTL_MS = 30 * 60 * 1000;
 
 function debug(...args: unknown[]) {
   if (DEBUG) console.error("[deepseek-oauth-server]", ...args);
@@ -25,6 +26,7 @@ export async function startServer(options: ServerOptions): Promise<ServerInstanc
   const credentials = deepSeekCredentials();
   const transport = createDeepSeekTransport(credentials);
   const sessions = new Map<string, string>();
+  const sessionTimestamps = new Map<string, number>();
   let activeRequests = 0;
   let shuttingDown = false;
 
@@ -35,7 +37,7 @@ export async function startServer(options: ServerOptions): Promise<ServerInstanc
     }
     activeRequests++;
     try {
-      await handleRequest(req, res, transport, sessions);
+      await handleRequest(req, res, transport, sessions, sessionTimestamps);
     } catch (e) {
       if (e instanceof LoginRequired) {
         sendText(res, 401, "Not signed in to DeepSeek. Run `deepseek-oauth login` first.");
@@ -46,6 +48,27 @@ export async function startServer(options: ServerOptions): Promise<ServerInstanc
     } finally {
       activeRequests--;
     }
+  });
+
+  server.requestTimeout = 300_000;
+  server.headersTimeout = 60_000;
+
+  const sessionCleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [key, ts] of sessionTimestamps) {
+      if (now - ts > SESSION_TTL_MS) {
+        sessions.delete(key);
+        sessionTimestamps.delete(key);
+      }
+    }
+  }, 60_000).unref();
+
+  await new Promise<void>((resolve, reject) => {
+    server.on("error", reject);
+    server.listen(options.port, options.host, () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
   });
 
   let closedResolve: () => void;
@@ -59,9 +82,8 @@ export async function startServer(options: ServerOptions): Promise<ServerInstanc
     closedReject(err);
   });
 
-  server.listen(options.port, options.host);
-
   server.on("close", () => {
+    clearInterval(sessionCleanupTimer);
     closedResolve?.();
   });
 
@@ -92,9 +114,25 @@ export async function startServer(options: ServerOptions): Promise<ServerInstanc
 
     if (activeRequests > 0) {
       debug(`Force-closing with ${activeRequests} request(s) still in-flight`);
-      if (typeof (server as unknown as Record<string, unknown>).closeAllConnections === "function") {
+      if (
+        typeof (server as unknown as Record<string, unknown>).closeAllConnections === "function"
+      ) {
         (server as unknown as { closeAllConnections(): void }).closeAllConnections();
       }
+    }
+
+    try {
+      const session = await credentials.getSession();
+      for (const chatSessionId of sessions.values()) {
+        try {
+          await deleteChatSession(session, chatSessionId);
+          debug(`Deleted chat session ${chatSessionId}`);
+        } catch {
+          debug(`Failed to delete chat session ${chatSessionId}`);
+        }
+      }
+    } catch {
+      debug("Could not delete chat sessions (credentials unavailable)");
     }
 
     if (options.onShutdown) {
@@ -130,6 +168,7 @@ async function handleRequest(
   res: ServerResponse,
   transport: ReturnType<typeof createDeepSeekTransport>,
   sessions: Map<string, string>,
+  sessionTimestamps: Map<string, number>,
 ): Promise<void> {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   const path = url.pathname;
@@ -154,9 +193,10 @@ async function handleRequest(
 
     const body = await readBody(req);
     const sessionKey = `${req.socket.remoteAddress}:${req.socket.remotePort}`;
-    const existingSessionId = req.headers["x-deepseek-chat-session-id"] as string
-      || sessions.get(sessionKey)
-      || undefined;
+    const existingSessionId =
+      (req.headers["x-deepseek-chat-session-id"] as string) ||
+      sessions.get(sessionKey) ||
+      undefined;
 
     const requestHeaders: Record<string, string> = { "content-type": "application/json" };
     if (existingSessionId) {
@@ -174,6 +214,7 @@ async function handleRequest(
     const responseSessionId = response.headers.get("x-deepseek-chat-session-id");
     if (responseSessionId) {
       sessions.set(sessionKey, responseSessionId);
+      sessionTimestamps.set(sessionKey, Date.now());
     }
 
     if (response.headers.get("content-type")?.includes("text/event-stream")) {

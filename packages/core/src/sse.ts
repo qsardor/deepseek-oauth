@@ -42,40 +42,40 @@ export class DeepSeekSSEParser {
   }
 
   private processLine(line: string): void {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data: ")) return;
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data: ")) return;
 
-      const payload = trimmed.slice(6).trim();
-      if (payload === "[DONE]") {
-        this.finalize();
-        return;
-      }
-
-      try {
-        const parsed = JSON.parse(payload) as Record<string, unknown>;
-        const data = parsed.data as { biz_code?: number; biz_msg?: string } | undefined;
-
-        if (data?.biz_code != null && data.biz_code !== 0) {
-          throw new Error(`DeepSeek API error: ${data.biz_msg || `biz_code ${data.biz_code}`}`);
-        }
-
-        if (
-          "v" in parsed &&
-          typeof parsed.v === "object" &&
-          parsed.v !== null &&
-          "response" in (parsed.v as Record<string, unknown>)
-        ) {
-          const snapshot = parsed.v as SSESnapshot;
-          this.handleSnapshot(snapshot);
-          this.emitDelta();
-        } else {
-          this.handlePatch(parsed as SSEPatch);
-        }
-      } catch (e) {
-        if (e instanceof SyntaxError) return;
-        throw e;
-      }
+    const payload = trimmed.slice(6).trim();
+    if (payload === "[DONE]") {
+      this.finalize();
+      return;
     }
+
+    try {
+      const parsed = JSON.parse(payload) as Record<string, unknown>;
+      const data = parsed.data as { biz_code?: number; biz_msg?: string } | undefined;
+
+      if (data?.biz_code != null && data.biz_code !== 0) {
+        throw new Error(`DeepSeek API error: ${data.biz_msg || `biz_code ${data.biz_code}`}`);
+      }
+
+      if (
+        "v" in parsed &&
+        typeof parsed.v === "object" &&
+        parsed.v !== null &&
+        "response" in (parsed.v as Record<string, unknown>)
+      ) {
+        const snapshot = parsed.v as SSESnapshot;
+        this.handleSnapshot(snapshot);
+        this.emitDelta();
+      } else {
+        this.handlePatch(parsed as SSEPatch);
+      }
+    } catch (e) {
+      if (e instanceof SyntaxError) return;
+      throw e;
+    }
+  }
 
   private handleSnapshot(snapshot: SSESnapshot): void {
     for (const fragment of snapshot.response.fragments) {

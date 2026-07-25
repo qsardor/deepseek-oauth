@@ -76,7 +76,9 @@ int solve_pow(const uint8_t* salt, int saltLen, int64_t expireAt, int32_t diffic
     uint8_t targetBytes[32];
     for (int i = 0; i < 32; i++) {
         char hi = target[i*2], lo = target[i*2+1];
-        targetBytes[i] = (uint8_t)(((hi>='a'?hi-87:hi-48)<<4) | (lo>='a'?lo-87:lo-48));
+		int hiv = hi>='0'&&hi<='9'?hi-48:hi>='A'&&hi<='F'?hi-55:hi>='a'&&hi<='f'?hi-87:0;
+		int lov = lo>='0'&&lo<='9'?lo-48:lo>='A'&&lo<='F'?lo-55:lo>='a'&&lo<='f'?lo-87:0;
+        targetBytes[i] = (uint8_t)((hiv<<4) | lov);
     }
 
     uint8_t buf[288];

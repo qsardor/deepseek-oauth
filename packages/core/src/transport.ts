@@ -1,9 +1,5 @@
 import { encodePowResponse, solvePoW } from "./pow.js";
-import {
-  buildCookieHeader,
-  buildHeaders,
-  createChatSession,
-} from "./session.js";
+import { buildCookieHeader, buildHeaders, createChatSession } from "./session.js";
 import { DeepSeekSSEParser } from "./sse.js";
 import type {
   DeepSeekCredentials,
@@ -23,13 +19,13 @@ interface ModelConfig {
 }
 
 const MODEL_MAP: Record<string, ModelConfig> = {
-  "deepseek-chat":    { model_type: "default", defaultThinking: false, defaultSearch: true },
+  "deepseek-chat": { model_type: "default", defaultThinking: false, defaultSearch: true },
   "deepseek-instant": { model_type: "default", defaultThinking: false, defaultSearch: true },
-  "deepseek-v3":      { model_type: "default", defaultThinking: false, defaultSearch: true },
+  "deepseek-v3": { model_type: "default", defaultThinking: false, defaultSearch: true },
   "deepseek-reasoner": { model_type: "expert", defaultThinking: true, defaultSearch: true },
-  "deepseek-expert":   { model_type: "expert", defaultThinking: true, defaultSearch: true },
-  "deepseek-r1":       { model_type: "expert", defaultThinking: true, defaultSearch: true },
-  "deepseek-vision":   { model_type: "vision", defaultThinking: false, defaultSearch: true },
+  "deepseek-expert": { model_type: "expert", defaultThinking: true, defaultSearch: true },
+  "deepseek-r1": { model_type: "expert", defaultThinking: true, defaultSearch: true },
+  "deepseek-vision": { model_type: "vision", defaultThinking: false, defaultSearch: true },
 };
 
 function resolveModel(model: string): ModelConfig {
@@ -74,7 +70,6 @@ function cleanMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
   return deduped;
 }
 
-
 function flattenMessages(messages: OpenAIMessage[]): string {
   const cleaned = cleanMessages(messages);
   return cleaned
@@ -98,6 +93,8 @@ function lastUserMessage(messages: OpenAIMessage[]): string {
 }
 
 export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
+  const messageIds = new Map<string, number>();
+
   return {
     baseURL: "https://deepseek-oauth.local/v1",
     async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -115,7 +112,7 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
         raw.tools = undefined;
         raw.tool_choice = undefined;
         const existingSessionId = request.headers.get("x-deepseek-chat-session-id");
-        return handleChatCompletions(body, credentials, existingSessionId);
+        return handleChatCompletions(body, credentials, existingSessionId, messageIds);
       }
 
       return new Response("Not Found", { status: 404 });
@@ -141,18 +138,16 @@ async function handleChatCompletions(
   body: OpenAIChatRequest,
   credentials: DeepSeekCredentials,
   existingSessionId?: string | null,
+  messageIds?: Map<string, number>,
 ): Promise<Response> {
   const session = await credentials.getSession();
   const config = resolveModel(body.model);
 
   const raw = body as unknown as Record<string, unknown>;
   const extraBody = (raw.extra_body ?? raw.thinking_body ?? {}) as Record<string, unknown>;
-  const thinking = extraBody.thinking !== undefined
-    ? Boolean(extraBody.thinking)
-    : config.defaultThinking;
-  const search = extraBody.search !== undefined
-    ? Boolean(extraBody.search)
-    : config.defaultSearch;
+  const thinking =
+    extraBody.thinking !== undefined ? Boolean(extraBody.thinking) : config.defaultThinking;
+  const search = extraBody.search !== undefined ? Boolean(extraBody.search) : config.defaultSearch;
 
   const isStream = body.stream !== false;
 
@@ -203,11 +198,14 @@ async function handleChatCompletions(
   const powResponse = solvePoW(challenge);
   const powEncoded = encodePowResponse(powResponse);
 
-  const maxTokens = body.max_tokens ?? 200000;
+  const parentMessageId =
+    isReuse && chatSessionId ? (messageIds?.get(chatSessionId) ?? null) : null;
+
+  const maxTokens = body.max_tokens;
 
   const completionBody = {
     chat_session_id: chatSessionId,
-    parent_message_id: null,
+    parent_message_id: parentMessageId,
     prompt,
     ref_file_ids: refFileIds,
     thinking_enabled: thinking,
@@ -215,7 +213,7 @@ async function handleChatCompletions(
     action: null,
     preempt: false,
     model_type: effectiveModelType,
-    max_tokens: maxTokens,
+    ...(maxTokens != null ? { max_tokens: maxTokens } : {}),
   };
 
   const headers = buildHeaders(session);
@@ -239,9 +237,15 @@ async function handleChatCompletions(
 
   let result: Response;
   if (isStream) {
-    result = await handleStreamingResponse(response, body.model);
+    result = await handleStreamingResponse(response, body.model, chatSessionId, messageIds);
   } else {
-    result = await handleNonStreamingResponse(response, body.model);
+    result = await handleNonStreamingResponse(
+      response,
+      body.model,
+      chatSessionId,
+      messageIds,
+      prompt,
+    );
   }
 
   result.headers.set("x-deepseek-chat-session-id", chatSessionId);
@@ -252,7 +256,10 @@ interface ExtractedImage {
   url: string;
 }
 
-function extractImages(messages: OpenAIMessage[]): { images: ExtractedImage[]; hasImages: boolean } {
+function extractImages(messages: OpenAIMessage[]): {
+  images: ExtractedImage[];
+  hasImages: boolean;
+} {
   const images: ExtractedImage[] = [];
   for (const msg of messages) {
     if (Array.isArray(msg.content)) {
@@ -338,10 +345,9 @@ async function uploadFile(
       await new Promise((r) => setTimeout(r, 500));
       const pollHeaders = buildHeaders(session);
       pollHeaders.cookie = buildCookieHeader(session.cookies, session.accessToken);
-      const pollRes = await fetch(
-        `${BASE_URL}/api/v0/file/fetch_files?file_ids=${fileId}`,
-        { headers: pollHeaders },
-      );
+      const pollRes = await fetch(`${BASE_URL}/api/v0/file/fetch_files?file_ids=${fileId}`, {
+        headers: pollHeaders,
+      });
       if (!pollRes.ok) continue;
       const pollData = (await pollRes.json()) as {
         code: number;
@@ -391,30 +397,7 @@ async function requestPoWChallengeForTarget(
 }
 
 async function requestPoWChallenge(session: DeepSeekSession): Promise<PoWChallenge> {
-  const headers = buildHeaders(session);
-  headers.cookie = buildCookieHeader(session.cookies, session.accessToken);
-
-  const response = await fetch(`${BASE_URL}/api/v0/chat/create_pow_challenge`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ target_path: "/api/v0/chat/completion" }),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`PoW challenge request failed: ${response.status} ${text}`);
-  }
-
-  const data = (await response.json()) as {
-    code: number;
-    data: { biz_data: { challenge: PoWChallenge } };
-  };
-
-  if (data.code !== 0) {
-    throw new Error(`PoW challenge failed: code ${data.code}`);
-  }
-
-  return data.data.biz_data.challenge;
+  return requestPoWChallengeForTarget(session, "/api/v0/chat/completion");
 }
 
 const DEBUG = !!process.env.DEBUG_DEEPSEEK;
@@ -426,6 +409,8 @@ function debug(...args: unknown[]) {
 async function handleStreamingResponse(
   deepseekResponse: Response,
   model: string,
+  chatSessionId: string,
+  messageIds?: Map<string, number>,
 ): Promise<Response> {
   if (!deepseekResponse.body) {
     throw new Error("No response body from DeepSeek");
@@ -447,7 +432,11 @@ async function handleStreamingResponse(
       let reasoningBuffer = "";
       let lastFlushTime = Date.now();
 
+      let streamClosed = false;
+
       const closeStream = () => {
+        if (streamClosed) return;
+        streamClosed = true;
         if (!streamStarted) {
           streamStarted = true;
           const chunk: OpenAIChatChunk = {
@@ -471,7 +460,11 @@ async function handleStreamingResponse(
         controller.close();
       };
 
-      const parser = new DeepSeekSSEParser((content, reasoning, done) => {
+      const parser = new DeepSeekSSEParser((content, reasoning, done, msgId) => {
+        if (msgId != null && messageIds) {
+          messageIds.set(chatSessionId, msgId);
+        }
+
         if (!streamStarted) {
           streamStarted = true;
           const chunk: OpenAIChatChunk = {
@@ -490,8 +483,10 @@ async function handleStreamingResponse(
         const hasPending = contentBuffer.length > 0 || reasoningBuffer.length > 0;
         const shouldFlush =
           done ||
-          hasPending && (contentBuffer.length > 20 || reasoningBuffer.length > 20 ||
-          (Date.now() - lastFlushTime > 50));
+          (hasPending &&
+            (contentBuffer.length > 20 ||
+              reasoningBuffer.length > 20 ||
+              Date.now() - lastFlushTime > 50));
         if (shouldFlush) {
           if (hasPending) {
             const delta: OpenAIChatChunk["choices"][0]["delta"] = {};
@@ -529,6 +524,18 @@ async function handleStreamingResponse(
         parser.flush();
       } catch (e) {
         debug("stream error:", e, "id:", id);
+        if (!streamClosed) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                error: {
+                  message: e instanceof Error ? e.message : "Stream error",
+                  type: "server_error",
+                },
+              })}\n\n`,
+            ),
+          );
+        }
       }
 
       if (!streamFinished) {
@@ -550,6 +557,9 @@ async function handleStreamingResponse(
 async function handleNonStreamingResponse(
   deepseekResponse: Response,
   model: string,
+  chatSessionId: string,
+  messageIds?: Map<string, number>,
+  prompt = "",
 ): Promise<Response> {
   if (!deepseekResponse.body) {
     throw new Error("No response body from DeepSeek");
@@ -562,9 +572,12 @@ async function handleNonStreamingResponse(
   let fullContent = "";
   let fullReasoning = "";
 
-  const parser = new DeepSeekSSEParser((content, reasoning) => {
+  const parser = new DeepSeekSSEParser((content, reasoning, _done, msgId) => {
     if (content) fullContent += content;
     if (reasoning) fullReasoning += reasoning;
+    if (msgId != null && messageIds) {
+      messageIds.set(chatSessionId, msgId);
+    }
   });
 
   while (true) {

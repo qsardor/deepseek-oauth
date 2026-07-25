@@ -1,12 +1,21 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8")) as {
+  version: string;
+};
+
 import { startLogin } from "./login.js";
 import { startServer } from "./server.js";
 
 export async function main(): Promise<void> {
   const argv = await yargs(hideBin(process.argv))
     .scriptName("deepseek-oauth")
-    .version("0.1.0")
+    .version(pkg.version)
     .usage("$0 [command]")
     .command(
       "serve",

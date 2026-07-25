@@ -1,11 +1,13 @@
-import type { PoWChallenge, PoWResponse } from "./types.js";
-import { readFileSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { PoWChallenge, PoWResponse } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-let wasmSolve: ((salt: string, expireAt: number, difficulty: number, target: string) => number) | null = null;
+let wasmSolve:
+  | ((salt: string, expireAt: number, difficulty: number, target: string) => number)
+  | null = null;
 
 function loadWasm(): typeof wasmSolve {
   if (wasmSolve) return wasmSolve;
@@ -34,7 +36,12 @@ function loadWasm(): typeof wasmSolve {
     buf2.set(targetBytes, 256);
 
     const answer = (instance.exports.solve_pow as CallableFunction)(
-      0, saltBytes.length, BigInt(expireAt), difficulty, 256, targetBytes.length
+      0,
+      saltBytes.length,
+      BigInt(expireAt),
+      difficulty,
+      256,
+      targetBytes.length,
     ) as number;
 
     return answer;
@@ -47,14 +54,30 @@ const RATE = 136;
 const STATE_SIZE = 200;
 
 const RC: bigint[] = [
-  0x0000000000000001n, 0x0000000000008082n, 0x800000000000808an,
-  0x8000000080008000n, 0x000000000000808bn, 0x0000000080000001n,
-  0x8000000080008081n, 0x8000000000008009n, 0x000000000000008an,
-  0x0000000000000088n, 0x0000000080008009n, 0x000000008000000an,
-  0x000000008000808bn, 0x800000000000008bn, 0x8000000000008089n,
-  0x8000000000008003n, 0x8000000000008002n, 0x8000000000000080n,
-  0x000000000000800an, 0x800000008000000an, 0x8000000080008081n,
-  0x8000000000008080n, 0x0000000080000001n, 0x8000000080008008n,
+  0x0000000000000001n,
+  0x0000000000008082n,
+  0x800000000000808an,
+  0x8000000080008000n,
+  0x000000000000808bn,
+  0x0000000080000001n,
+  0x8000000080008081n,
+  0x8000000000008009n,
+  0x000000000000008an,
+  0x0000000000000088n,
+  0x0000000080008009n,
+  0x000000008000000an,
+  0x000000008000808bn,
+  0x800000000000008bn,
+  0x8000000000008089n,
+  0x8000000000008003n,
+  0x8000000000008002n,
+  0x8000000000000080n,
+  0x000000000000800an,
+  0x800000008000000an,
+  0x8000000080008081n,
+  0x8000000000008080n,
+  0x0000000080000001n,
+  0x8000000080008008n,
 ];
 
 const RHO_OFFSETS = [
@@ -108,19 +131,26 @@ function keccakF1600(state: bigint[], startRound: number, endRound: number): voi
       for (let y = 0; y < 5; y++) state[x + 5 * y] ^= d;
     }
 
-    let x = 1, y = 0;
+    let x = 1;
+    let y = 0;
     let current = state[x + 5 * y];
     for (let t = 0; t < 24; t++) {
-      const nx = y, ny = (2 * x + 3 * y) % 5;
+      const nx = y;
+      const ny = (2 * x + 3 * y) % 5;
       const tmp = state[nx + 5 * ny];
       state[nx + 5 * ny] = rotl64(current, RHO_OFFSETS[x + 5 * y]);
       current = tmp;
-      x = nx; y = ny;
+      x = nx;
+      y = ny;
     }
 
     for (let y = 0; y < 5; y++) {
       const iy = 5 * y;
-      const l0 = state[iy], l1 = state[1 + iy], l2 = state[2 + iy], l3 = state[3 + iy], l4 = state[4 + iy];
+      const l0 = state[iy];
+      const l1 = state[1 + iy];
+      const l2 = state[2 + iy];
+      const l3 = state[3 + iy];
+      const l4 = state[4 + iy];
       state[iy] = l0 ^ (~l1 & l2);
       state[1 + iy] = l1 ^ (~l2 & l3);
       state[2 + iy] = l2 ^ (~l3 & l4);
@@ -199,7 +229,8 @@ function solvePoWJS(challenge: PoWChallenge): number {
 
     let match = true;
     for (let i = 0; i < 32 && match; i++) {
-      const expected = (hexVal(challengeHex.charCodeAt(i * 2)) << 4) | hexVal(challengeHex.charCodeAt(i * 2 + 1));
+      const expected =
+        (hexVal(challengeHex.charCodeAt(i * 2)) << 4) | hexVal(challengeHex.charCodeAt(i * 2 + 1));
       if (_result[i] !== expected) match = false;
     }
 
@@ -211,7 +242,9 @@ function solvePoWJS(challenge: PoWChallenge): number {
 
 function hexVal(c: number): number {
   if (c >= 48 && c <= 57) return c - 48;
-  return c - 87;
+  if (c >= 65 && c <= 70) return c - 55;
+  if (c >= 97 && c <= 102) return c - 87;
+  return 0;
 }
 
 export function encodePowResponse(response: PoWResponse): string {

@@ -41,13 +41,33 @@ function tryCompile(clangPath) {
 function installLlvm() {
   console.log("[build:wasm] Installing LLVM...");
   if (isMac) {
-    try { execSync("brew install llvm", { stdio: "inherit" }); return true; } catch { return false; }
+    try {
+      execSync("brew install llvm", { stdio: "inherit" });
+      return true;
+    } catch {
+      return false;
+    }
   }
   if (isLinux) {
-    try { execSync("sudo apt-get update -qq && sudo apt-get install -y -qq clang", { stdio: "inherit" }); return true; } catch { return false; }
+    try {
+      execSync("sudo apt-get update -qq && sudo apt-get install -y -qq clang", {
+        stdio: "inherit",
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
   if (isWindows) {
-    try { execSync("winget install LLVM.LLVM --accept-source-agreements --accept-package-agreements --silent", { stdio: "inherit" }); return true; } catch { return false; }
+    try {
+      execSync(
+        "winget install LLVM.LLVM --accept-source-agreements --accept-package-agreements --silent",
+        { stdio: "inherit" },
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }
   return false;
 }
@@ -57,14 +77,16 @@ let clang = findClang();
 if (clang) {
   console.log("[build:wasm] Compiling solver.c → solver.wasm");
   if (tryCompile(clang) && existsSync(wasmOut)) {
-    console.log("[build:wasm] Done (" + statSync(wasmOut).size + " bytes)");
+    console.log(`[build:wasm] Done (${statSync(wasmOut).size} bytes)`);
     process.exit(0);
   }
 }
 
 if (existsSync(wasmOut)) {
   const reason = clang ? "compilation failed —" : "no clang found —";
-  console.log(`[build:wasm] ${reason} using pre-built solver.wasm (${statSync(wasmOut).size} bytes)`);
+  console.log(
+    `[build:wasm] ${reason} using pre-built solver.wasm (${statSync(wasmOut).size} bytes)`,
+  );
   process.exit(0);
 }
 
@@ -73,7 +95,7 @@ if (installLlvm()) {
   if (clang) {
     console.log("[build:wasm] Compiling solver.c → solver.wasm");
     if (tryCompile(clang) && existsSync(wasmOut)) {
-      console.log("[build:wasm] Done (" + statSync(wasmOut).size + " bytes)");
+      console.log(`[build:wasm] Done (${statSync(wasmOut).size} bytes)`);
       process.exit(0);
     }
   }

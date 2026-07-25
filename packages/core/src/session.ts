@@ -81,5 +81,7 @@ export async function deleteChatSession(
     await apiRequest(session, "/api/v0/chat_session/delete", {
       chat_session_id: chatSessionId,
     });
-  } catch {}
+  } catch {
+    // best-effort cleanup
+  }
 }
