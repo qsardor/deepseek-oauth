@@ -16,8 +16,24 @@ import type {
 
 const BASE_URL = "https://chat.deepseek.com";
 
-function modelToType(model: string): { model_type: string; thinking: boolean; search: boolean } {
-  return { model_type: "default", thinking: true, search: false };
+interface ModelConfig {
+  model_type: string;
+  defaultThinking: boolean;
+  defaultSearch: boolean;
+}
+
+const MODEL_MAP: Record<string, ModelConfig> = {
+  "deepseek-chat":    { model_type: "default", defaultThinking: false, defaultSearch: true },
+  "deepseek-instant": { model_type: "default", defaultThinking: false, defaultSearch: true },
+  "deepseek-v3":      { model_type: "default", defaultThinking: false, defaultSearch: true },
+  "deepseek-reasoner": { model_type: "expert", defaultThinking: true, defaultSearch: true },
+  "deepseek-expert":   { model_type: "expert", defaultThinking: true, defaultSearch: true },
+  "deepseek-r1":       { model_type: "expert", defaultThinking: true, defaultSearch: true },
+  "deepseek-vision":   { model_type: "vision", defaultThinking: false, defaultSearch: true },
+};
+
+function resolveModel(model: string): ModelConfig {
+  return MODEL_MAP[model] ?? MODEL_MAP["deepseek-chat"];
 }
 
 function extractContent(content: string | { type: string; text?: string }[] | null): string {
@@ -108,22 +124,15 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
 }
 
 async function handleModels(): Promise<Response> {
-  const models = [
-    {
-      id: "deepseek-instant",
-      object: "model",
-      created: Math.floor(Date.now() / 1000),
-      owned_by: "deepseek",
-    },
-    {
-      id: "deepseek-expert",
-      object: "model",
-      created: Math.floor(Date.now() / 1000),
-      owned_by: "deepseek",
-    },
-  ];
+  const ids = Object.keys(MODEL_MAP);
+  const data = ids.map((id) => ({
+    id,
+    object: "model",
+    created: Math.floor(Date.now() / 1000),
+    owned_by: "deepseek",
+  }));
 
-  return new Response(JSON.stringify({ object: "list", data: models }), {
+  return new Response(JSON.stringify({ object: "list", data }), {
     headers: { "content-type": "application/json" },
   });
 }
@@ -134,7 +143,17 @@ async function handleChatCompletions(
   existingSessionId?: string | null,
 ): Promise<Response> {
   const session = await credentials.getSession();
-  const { model_type, thinking, search } = modelToType(body.model);
+  const config = resolveModel(body.model);
+
+  const raw = body as unknown as Record<string, unknown>;
+  const extraBody = (raw.extra_body ?? raw.thinking_body ?? {}) as Record<string, unknown>;
+  const thinking = extraBody.thinking !== undefined
+    ? Boolean(extraBody.thinking)
+    : config.defaultThinking;
+  const search = extraBody.search !== undefined
+    ? Boolean(extraBody.search)
+    : config.defaultSearch;
+
   const isStream = body.stream !== false;
 
   let chatSessionId: string;
@@ -148,9 +167,33 @@ async function handleChatCompletions(
     chatSessionId = chatSession.id;
   }
 
-  const prompt = isReuse
-    ? `User: ${lastUserMessage(body.messages)}`
-    : flattenMessages(body.messages);
+  const { images, hasImages } = extractImages(body.messages);
+  const refFileIds: string[] = [];
+  const textMessages = hasImages ? stripImageParts(body.messages) : body.messages;
+
+  let effectiveModelType = config.model_type;
+
+  if (hasImages) {
+    effectiveModelType = "vision";
+    for (const img of images) {
+      const buffer = dataUriToBuffer(img.url);
+      if (buffer) {
+        const fileId = await uploadFile(session, buffer, "image.png", "vision");
+        if (fileId) refFileIds.push(fileId);
+      }
+    }
+  }
+
+  let prompt: string;
+  if (isReuse) {
+    prompt = `User: ${lastUserMessage(textMessages)}`;
+  } else {
+    prompt = flattenMessages(textMessages);
+  }
+
+  if (hasImages && !prompt.trim()) {
+    prompt = "Describe this image.";
+  }
 
   const challenge = await requestPoWChallenge(session);
   const powResponse = solvePoW(challenge);
@@ -160,12 +203,12 @@ async function handleChatCompletions(
     chat_session_id: chatSessionId,
     parent_message_id: null,
     prompt,
-    ref_file_ids: [],
+    ref_file_ids: refFileIds,
     thinking_enabled: thinking,
     search_enabled: search,
     action: null,
     preempt: false,
-    model_type,
+    model_type: effectiveModelType,
   };
 
   const headers = buildHeaders(session);
@@ -196,6 +239,148 @@ async function handleChatCompletions(
 
   result.headers.set("x-deepseek-chat-session-id", chatSessionId);
   return result;
+}
+
+interface ExtractedImage {
+  url: string;
+}
+
+function extractImages(messages: OpenAIMessage[]): { images: ExtractedImage[]; hasImages: boolean } {
+  const images: ExtractedImage[] = [];
+  for (const msg of messages) {
+    if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part.type === "image_url" && part.image_url?.url) {
+          images.push({ url: part.image_url.url });
+        }
+      }
+    }
+  }
+  return { images, hasImages: images.length > 0 };
+}
+
+function stripImageParts(messages: OpenAIMessage[]): OpenAIMessage[] {
+  return messages.map((msg) => {
+    if (Array.isArray(msg.content)) {
+      const textParts = msg.content.filter((p) => p.type !== "image_url");
+      if (textParts.length === 0) return msg;
+      return { ...msg, content: textParts };
+    }
+    return msg;
+  });
+}
+
+function dataUriToBuffer(dataUri: string): Uint8Array | null {
+  if (dataUri.startsWith("data:")) {
+    const commaPos = dataUri.indexOf(",");
+    if (commaPos === -1) return null;
+    const base64 = dataUri.slice(commaPos + 1);
+    try {
+      return new Uint8Array(Buffer.from(base64, "base64"));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+async function uploadFile(
+  session: DeepSeekSession,
+  fileBuffer: Uint8Array,
+  fileName: string,
+  modelType: string,
+): Promise<string | null> {
+  const challenge = await requestPoWChallengeForTarget(session, "/api/v0/file/upload_file");
+  const powResponse = solvePoW(challenge);
+  const powEncoded = encodePowResponse(powResponse);
+
+  const boundary = `--deepseek-upload-${Date.now()}`;
+  const header = `\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: image/png\r\n\r\n`;
+  const footer = `\r\n--${boundary}--`;
+
+  const headerBytes = new TextEncoder().encode(header);
+  const footerBytes = new TextEncoder().encode(footer);
+  const body = new Uint8Array(headerBytes.length + fileBuffer.length + footerBytes.length);
+  body.set(headerBytes, 0);
+  body.set(fileBuffer, headerBytes.length);
+  body.set(footerBytes, headerBytes.length + fileBuffer.length);
+
+  const headers = buildHeaders(session);
+  headers.cookie = buildCookieHeader(session.cookies, session.accessToken);
+  headers["content-type"] = `multipart/form-data; boundary=${boundary}`;
+  headers["x-ds-pow-response"] = powEncoded;
+  headers["x-thinking-enabled"] = "0";
+  headers["x-model-type"] = modelType;
+  headers["x-file-size"] = String(fileBuffer.length);
+
+  try {
+    const response = await fetch(`${BASE_URL}/api/v0/file/upload_file`, {
+      method: "POST",
+      headers,
+      body,
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as {
+      code: number;
+      data: { biz_data: { id: string; status: string } };
+    };
+    if (data.code !== 0) return null;
+    const fileId = data.data.biz_data.id;
+
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const pollHeaders = buildHeaders(session);
+      pollHeaders.cookie = buildCookieHeader(session.cookies, session.accessToken);
+      const pollRes = await fetch(
+        `${BASE_URL}/api/v0/file/fetch_files?file_ids=${fileId}`,
+        { headers: pollHeaders },
+      );
+      if (!pollRes.ok) continue;
+      const pollData = (await pollRes.json()) as {
+        code: number;
+        data: { biz_data: { files: Array<{ id: string; status: string }> } };
+      };
+      if (pollData.code !== 0) continue;
+      const file = pollData.data.biz_data.files[0];
+      if (file && file.status !== "PENDING" && file.status !== "PARSING") {
+        if (file.status === "SUCCESS") return fileId;
+        return null;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function requestPoWChallengeForTarget(
+  session: DeepSeekSession,
+  targetPath: string,
+): Promise<PoWChallenge> {
+  const headers = buildHeaders(session);
+  headers.cookie = buildCookieHeader(session.cookies, session.accessToken);
+
+  const response = await fetch(`${BASE_URL}/api/v0/chat/create_pow_challenge`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ target_path: targetPath }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`PoW challenge request failed: ${response.status} ${text}`);
+  }
+
+  const data = (await response.json()) as {
+    code: number;
+    data: { biz_data: { challenge: PoWChallenge } };
+  };
+
+  if (data.code !== 0) {
+    throw new Error(`PoW challenge failed: code ${data.code}`);
+  }
+
+  return data.data.biz_data.challenge;
 }
 
 async function requestPoWChallenge(session: DeepSeekSession): Promise<PoWChallenge> {

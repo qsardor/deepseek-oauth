@@ -37,8 +37,54 @@ Your session is stored in `~/.deepseek-oauth/auth.json` and refreshes automatica
 
 ## Models
 
-- `deepseek-instant`
-- `deepseek-expert`
+| Model | Capabilities |
+|-------|-------------|
+| `deepseek-chat` | Chat, streaming |
+| `deepseek-instant` | Same as `deepseek-chat` |
+| `deepseek-v3` | Same as `deepseek-chat` |
+| `deepseek-reasoner` | Chat, streaming, DeepThink reasoning |
+| `deepseek-expert` | Same as `deepseek-reasoner` |
+| `deepseek-r1` | Same as `deepseek-reasoner` |
+| `deepseek-vision` | Chat, streaming, image understanding |
+
+### DeepThink reasoning and web search
+
+Control `thinking` and `search` per request via `extra_body` (OpenAI-compatible):
+
+```ts
+const res = await openai.chat.completions.create({
+  model: "deepseek-chat",
+  messages: [{ role: "user", content: "What's new today?" }],
+  extra_body: {
+    thinking: true,   // enable DeepThink reasoning
+    search: true,      // enable web search
+  },
+});
+```
+
+Reasoning models (`deepseek-reasoner`, etc.) have `thinking` enabled by default.
+
+### Vision
+
+Send images as `image_url` content parts. The proxy handles upload automatically:
+
+```ts
+const res = await openai.chat.completions.create({
+  model: "deepseek-vision",
+  messages: [{
+    role: "user",
+    content: [
+      { type: "text", text: "What is in this image?" },
+      {
+        type: "image_url",
+        image_url: { url: "data:image/jpeg;base64,..." }
+      },
+    ],
+  }],
+});
+```
+
+When images are present the proxy automatically switches to the vision model. Both `data:` URIs and `https://` URLs are supported.
 
 ## Using from code
 
@@ -53,7 +99,7 @@ const res = await transport.fetch(
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "deepseek-instant",
+      model: "deepseek-chat",
       messages: [{ role: "user", content: "Hello!" }],
     }),
   })
@@ -84,13 +130,14 @@ const openai = new OpenAI({
 | Package | Description |
 |---------|-------------|
 | `deepseek-oauth` | CLI: `login` and `serve` commands |
-| `@deepseek-oauth/core` | Transport, SSE parser, PoW solver, types |
+| `@deepseek-oauth/core` | Transport, SSE parser, PoW solver, file upload, types |
 | `@deepseek-oauth/local` | Browser auth (Playwright), credential storage |
 
 ## Limitations
 
 - Tool calling is not supported (DeepSeek's internal API doesn't expose it).
 - Only models available through the web chat are exposed.
+- Image uploads require the proxy to solve an additional PoW challenge per file.
 
 ---
 
