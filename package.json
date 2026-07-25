@@ -4,11 +4,16 @@
   "packageManager": "npm@10.9.8",
   "workspaces": ["packages/*"],
   "scripts": {
+    "setup": "npm run build && npx playwright install chromium",
     "build": "turbo run build",
     "dev": "turbo run dev",
     "lint": "biome check .",
     "format": "biome format --write .",
-    "clean": "turbo run clean"
+    "clean": "turbo run clean",
+    "serve": "deepseek-oauth serve",
+    "login": "deepseek-oauth login",
+    "deepseek-oauth": "deepseek-oauth",
+    "link": "cd packages/deepseek-oauth && npm link"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

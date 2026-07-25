@@ -2,23 +2,23 @@
 
 Use DeepSeek's models through any OpenAI-compatible client. No API key needed.
 
-```txt
-$ npx deepseek-oauth serve
-  OpenAI-compatible endpoint ready at http://127.0.0.1:10531/v1
-```
-
----
-
-## How it works
-
-Sign in once via your browser, then run the proxy. That's it.
+## Setup
 
 ```sh
-npx deepseek-oauth login    # sign in once (opens your browser)
-npx deepseek-oauth serve    # start the proxy
+git clone https://github.com/Devlrxxh/deepseek-oauth.git
+cd deepseek-oauth
+npm run setup    # installs dependencies, builds, downloads Playwright Chromium
+npm run link     # makes deepseek-oauth available globally
 ```
 
-Your session is stored in `~/.deepseek-oauth/auth.json` and refreshes automatically in the background. Set `DEEPSEEK_TOKEN` if you want to bypass file auth entirely (useful for CI).
+## Quick start
+
+```sh
+deepseek-oauth login   # open browser to sign in
+deepseek-oauth serve   # start the proxy
+```
+
+Your session is stored in `~/.deepseek-oauth/auth.json` and refreshes automatically. Or set the `DEEPSEEK_TOKEN` environment variable with your token instead.
 
 ## Server flags
 
@@ -27,11 +27,20 @@ Your session is stored in `~/.deepseek-oauth/auth.json` and refreshes automatica
 | `--host` | `127.0.0.1` | Interface to bind to |
 | `--port` | `10531` | Port to listen on |
 
-## Using it from code
+## Endpoints
 
-```bash
-npm i @deepseek-oauth/core @deepseek-oauth/local
-```
+| Path | Method | Description |
+|------|--------|-------------|
+| `/v1/chat/completions` | POST | Chat (streaming and non-streaming) |
+| `/v1/models` | GET | Available model list |
+| `/health` | GET | Health check |
+
+## Models
+
+- `deepseek-instant`
+- `deepseek-expert`
+
+## Using from code
 
 ```ts
 import { createDeepSeekTransport } from "@deepseek-oauth/core";
@@ -54,8 +63,6 @@ const data = await res.json();
 console.log(data.choices[0].message.content);
 ```
 
-The transport object exposes `baseURL` and `fetch`. Plug them into any OpenAI-compatible client.
-
 ### With the OpenAI JS SDK
 
 ```ts
@@ -72,40 +79,19 @@ const openai = new OpenAI({
 });
 ```
 
-### Direct session access
-
-```ts
-import { deepSeekCredentials } from "@deepseek-oauth/local";
-
-const session = await deepSeekCredentials().getSession();
-console.log(session.accessToken);
-```
-
 ## Packages
 
-| Package | Description | Dependencies |
-|---------|-------------|--------------|
-| `deepseek-oauth` | CLI: `login` and `serve` commands | core + local |
-| `@deepseek-oauth/core` | Transport, SSE parser, PoW solver, types | none |
-| `@deepseek-oauth/local` | Browser auth (Playwright), credential storage | core |
-
-## Endpoints
-
-| Path | Method | Description |
-|------|--------|-------------|
-| `/v1/chat/completions` | POST | Chat (streaming and non-streaming) |
-| `/v1/models` | GET | Available model list |
-| `/health` | GET | Health check |
-
-## Models
-
-- `deepseek-instant`
-- `deepseek-expert`
+| Package | Description |
+|---------|-------------|
+| `deepseek-oauth` | CLI: `login` and `serve` commands |
+| `@deepseek-oauth/core` | Transport, SSE parser, PoW solver, types |
+| `@deepseek-oauth/local` | Browser auth (Playwright), credential storage |
 
 ## Limitations
 
-- Tool calling is stripped from requests (DeepSeek's internal API doesn't support it).
+- Tool calling is not supported (DeepSeek's internal API doesn't expose it).
 - Only models available through the web chat are exposed.
+
 ---
 
 Inspired by [openai-oauth](https://github.com/EvanZhouDev/openai-oauth).
