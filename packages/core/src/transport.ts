@@ -203,6 +203,8 @@ async function handleChatCompletions(
   const powResponse = solvePoW(challenge);
   const powEncoded = encodePowResponse(powResponse);
 
+  const maxTokens = body.max_tokens ?? 200000;
+
   const completionBody = {
     chat_session_id: chatSessionId,
     parent_message_id: null,
@@ -213,6 +215,7 @@ async function handleChatCompletions(
     action: null,
     preempt: false,
     model_type: effectiveModelType,
+    max_tokens: maxTokens,
   };
 
   const headers = buildHeaders(session);
@@ -592,9 +595,9 @@ async function handleNonStreamingResponse(
       },
     ],
     usage: {
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      total_tokens: 0,
+      prompt_tokens: Math.ceil(prompt.length / 3),
+      completion_tokens: Math.ceil(fullContent.length / 3),
+      total_tokens: Math.ceil((prompt.length + fullContent.length) / 3),
     },
   };
 
