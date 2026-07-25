@@ -1,0 +1,31 @@
+{
+  "name": "deepseek-oauth",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "deepseek-oauth": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@deepseek-oauth/core": "*",
+    "@deepseek-oauth/local": "*",
+    "yargs": "^17.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/yargs": "^17.0.33",
+    "typescript": "^5.9.2"
+  }
+}
