@@ -4,8 +4,9 @@
   "packageManager": "npm@10.9.8",
   "workspaces": ["packages/*"],
   "scripts": {
-    "setup": "npm install && npm run build && npx playwright install chromium",
+    "setup": "npm install && npm run build:wasm && npm run build && npx playwright install chromium",
     "build": "turbo run build",
+    "build:wasm": "node scripts/build-wasm.js",
     "dev": "turbo run dev",
     "lint": "biome check .",
     "format": "biome format --write .",
