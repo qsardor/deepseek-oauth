@@ -29,8 +29,21 @@ export class DeepSeekSSEParser {
     this.buffer = lines.pop() || "";
 
     for (const line of lines) {
+      this.processLine(line);
+    }
+  }
+
+  flush(): void {
+    if (this.buffer) {
+      this.processLine(this.buffer);
+      this.buffer = "";
+    }
+    this.finalize();
+  }
+
+  private processLine(line: string): void {
       const trimmed = line.trim();
-      if (!trimmed.startsWith("data: ")) continue;
+      if (!trimmed.startsWith("data: ")) return;
 
       const payload = trimmed.slice(6).trim();
       if (payload === "[DONE]") {
@@ -63,7 +76,6 @@ export class DeepSeekSSEParser {
         throw e;
       }
     }
-  }
 
   private handleSnapshot(snapshot: SSESnapshot): void {
     for (const fragment of snapshot.response.fragments) {
@@ -102,6 +114,7 @@ export class DeepSeekSSEParser {
             this.activeFragmentType = "RESPONSE";
           }
         }
+
         this.emitDelta();
         return;
       }

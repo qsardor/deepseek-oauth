@@ -11,71 +11,73 @@ export async function loginViaBrowser(): Promise<DeepSeekSession> {
     args: ["--disable-blink-features=AutomationControlled"],
   });
 
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
-    locale: "en-US",
-  });
-
-  const page = await context.newPage();
-
-  console.log("\nOpening browser to sign in to DeepSeek...");
-  console.log("Please sign in at chat.deepseek.com in the opened browser window.");
-  console.log("The process will continue automatically once you're signed in.\n");
-
-  await page.goto(DEEPSEEK_URL, { waitUntil: "networkidle", timeout: 60000 });
-
   try {
-    await page.waitForURL(
-      (url) => url.href.startsWith(DEEPSEEK_URL) && !url.href.includes("/sign_in"),
-      { timeout: 300000 },
-    );
-  } catch {
-    console.log("Proceeding with current page state...");
-  }
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      locale: "en-US",
+    });
 
-  await page.waitForTimeout(2000);
+    const page = await context.newPage();
 
-  const token = await page.evaluate(() => {
+    console.log("\nOpening browser to sign in to DeepSeek...");
+    console.log("Please sign in at chat.deepseek.com in the opened browser window.");
+    console.log("The process will continue automatically once you're signed in.\n");
+
+    await page.goto(DEEPSEEK_URL, { waitUntil: "networkidle", timeout: 60000 });
+
     try {
-      const raw = localStorage.getItem("userToken");
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      return parsed.value || null;
+      await page.waitForURL(
+        (url) => url.href.startsWith(DEEPSEEK_URL) && !url.href.includes("/sign_in"),
+        { timeout: 300000 },
+      );
     } catch {
-      return null;
+      console.log("Proceeding with current page state...");
     }
-  });
 
-  if (!token) {
-    await browser.close();
-    throw new Error(
-      "Could not extract authentication token. Make sure you're signed in to chat.deepseek.com.",
-    );
+    await page.waitForTimeout(2000);
+
+    const token = await page.evaluate(() => {
+      try {
+        const raw = localStorage.getItem("userToken");
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed.value || null;
+      } catch {
+        return null;
+      }
+    });
+
+    if (!token) {
+      throw new Error(
+        "Could not extract authentication token. Make sure you're signed in to chat.deepseek.com.",
+      );
+    }
+
+    const cookies = await context.cookies();
+    const cookieMap: Record<string, string> = {};
+    for (const c of cookies) {
+      cookieMap[c.name] = c.value;
+    }
+
+    const userAgent = await page.evaluate(() => navigator.userAgent);
+
+    return {
+      accessToken: token,
+      cookies: cookieMap,
+      userAgent,
+      capturedAt: Date.now(),
+    };
+  } finally {
+    await browser.close().catch(() => {});
   }
-
-  const cookies = await context.cookies();
-  const cookieMap: Record<string, string> = {};
-  for (const c of cookies) {
-    cookieMap[c.name] = c.value;
-  }
-
-  const userAgent = await page.evaluate(() => navigator.userAgent);
-
-  await browser.close();
-
-  return {
-    accessToken: token,
-    cookies: cookieMap,
-    userAgent,
-    capturedAt: Date.now(),
-  };
 }
 
 export async function refreshSession(stored: StoredCredentials): Promise<DeepSeekSession | null> {
   const { chromium } = await import("playwright");
 
+  let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
   try {
-    const browser = await chromium.launch({
+    browser = await chromium.launch({
       headless: true,
       args: ["--disable-blink-features=AutomationControlled"],
     });
@@ -114,7 +116,6 @@ export async function refreshSession(stored: StoredCredentials): Promise<DeepSee
     });
 
     if (!token) {
-      await browser.close();
       return null;
     }
 
@@ -126,8 +127,6 @@ export async function refreshSession(stored: StoredCredentials): Promise<DeepSee
 
     const userAgent = await page.evaluate(() => navigator.userAgent);
 
-    await browser.close();
-
     return {
       accessToken: token,
       cookies: cookieMap,
@@ -136,5 +135,9 @@ export async function refreshSession(stored: StoredCredentials): Promise<DeepSee
     };
   } catch {
     return null;
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
   }
 }

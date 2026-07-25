@@ -26,7 +26,7 @@ export function buildCookieHeader(cookies: Record<string, string>, accessToken?:
     all.user_token = accessToken;
   }
   return Object.entries(all)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .map(([k, v]) => `${k}=${v}`)
     .join("; ");
 }
 

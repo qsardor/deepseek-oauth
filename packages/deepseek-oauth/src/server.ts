@@ -36,8 +36,14 @@ export async function startServer(options: ServerOptions): Promise<ServerInstanc
   });
 
   let closedResolve: () => void;
-  const closedPromise = new Promise<void>((resolve) => {
+  let closedReject: (err: Error) => void;
+  const closedPromise = new Promise<void>((resolve, reject) => {
     closedResolve = resolve;
+    closedReject = reject;
+  });
+
+  server.on("error", (err: Error) => {
+    closedReject(err);
   });
 
   server.listen(options.port, options.host);
@@ -114,9 +120,12 @@ async function handleRequest(
           const { done, value } = await reader.read();
           if (done) break;
           const text = decoder.decode(value, { stream: true });
-          res.write(text);
+          const ok = res.write(text);
           totalChunks++;
           debug("piped chunk", totalChunks, "length:", text.length);
+          if (!ok) {
+            await new Promise<void>((resolve) => res.once("drain", resolve));
+          }
         }
       } finally {
         debug("SSE stream complete, total chunks:", totalChunks);

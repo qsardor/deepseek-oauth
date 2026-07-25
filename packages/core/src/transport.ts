@@ -49,8 +49,16 @@ function cleanMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
   }
   const deduped: OpenAIMessage[] = [];
   for (const m of cleaned) {
-    if (deduped.length > 0 && deduped[deduped.length - 1].role === m.role) continue;
-    deduped.push(m);
+    if (deduped.length > 0 && deduped[deduped.length - 1].role === m.role) {
+      const prev = deduped[deduped.length - 1];
+      const prevText = extractContent(prev.content);
+      const curText = extractContent(m.content);
+      if (curText) {
+        prev.content = prevText ? `${prevText}\n\n${curText}` : curText;
+      }
+    } else {
+      deduped.push(m);
+    }
   }
   return deduped;
 }
@@ -230,6 +238,7 @@ async function handleStreamingResponse(
       let streamFinished = false;
       let totalBytes = 0;
       let contentBuffer = "";
+      let reasoningBuffer = "";
       let lastFlushTime = Date.now();
 
       const closeStream = () => {
@@ -270,22 +279,28 @@ async function handleStreamingResponse(
         }
 
         contentBuffer += content;
+        reasoningBuffer += reasoning;
 
+        const hasPending = contentBuffer.length > 0 || reasoningBuffer.length > 0;
         const shouldFlush =
           done ||
-          contentBuffer.length > 20 ||
-          (Date.now() - lastFlushTime > 50 && contentBuffer.length > 0);
+          hasPending && (contentBuffer.length > 20 || reasoningBuffer.length > 20 ||
+          (Date.now() - lastFlushTime > 50));
         if (shouldFlush) {
-          if (contentBuffer) {
+          if (hasPending) {
+            const delta: OpenAIChatChunk["choices"][0]["delta"] = {};
+            if (contentBuffer) delta.content = contentBuffer;
+            if (reasoningBuffer) delta.reasoning_content = reasoningBuffer;
             const chunk: OpenAIChatChunk = {
               id,
               object: "chat.completion.chunk",
               created,
               model,
-              choices: [{ index: 0, delta: { content: contentBuffer }, finish_reason: null }],
+              choices: [{ index: 0, delta, finish_reason: null }],
             };
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
             contentBuffer = "";
+            reasoningBuffer = "";
             lastFlushTime = Date.now();
           }
         }
@@ -305,7 +320,7 @@ async function handleStreamingResponse(
           parser.feed(decoder.decode(value, { stream: true }));
         }
         debug("reader exhausted, total bytes:", totalBytes, "id:", id);
-        parser.feed("");
+        parser.flush();
       } catch (e) {
         debug("stream error:", e, "id:", id);
       }
@@ -339,15 +354,26 @@ async function handleNonStreamingResponse(
   const created = Math.floor(Date.now() / 1000);
 
   let fullContent = "";
+  let fullReasoning = "";
 
-  const parser = new DeepSeekSSEParser((content, _reasoning) => {
+  const parser = new DeepSeekSSEParser((content, reasoning) => {
     if (content) fullContent += content;
+    if (reasoning) fullReasoning += reasoning;
   });
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     parser.feed(decoder.decode(value, { stream: true }));
+  }
+  parser.flush();
+
+  const message: Record<string, unknown> = {
+    role: "assistant",
+    content: fullContent,
+  };
+  if (fullReasoning) {
+    message.reasoning_content = fullReasoning;
   }
 
   const responseBody = {
@@ -358,10 +384,7 @@ async function handleNonStreamingResponse(
     choices: [
       {
         index: 0,
-        message: {
-          role: "assistant",
-          content: fullContent,
-        },
+        message,
         finish_reason: "stop",
       },
     ],

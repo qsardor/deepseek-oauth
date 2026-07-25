@@ -142,7 +142,7 @@ export function solvePoW(challenge: PoWChallenge): PoWResponse {
   const prefix = `${challenge.salt}_${challenge.expire_at}_`;
   const prefixBytes = new TextEncoder().encode(prefix);
 
-  for (let n = 0; n < challenge.difficulty; n++) {
+  for (let n = 0; n <= challenge.difficulty; n++) {
     const nStr = String(n);
     const input = new Uint8Array(prefixBytes.length + nStr.length);
     input.set(prefixBytes);
