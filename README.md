@@ -44,7 +44,7 @@ const res = await transport.fetch(
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "deepseek-chat",
+      model: "deepseek-instant",
       messages: [{ role: "user", content: "Hello!" }],
     }),
   })
@@ -99,7 +99,7 @@ console.log(session.accessToken);
 
 ## Models
 
-- `deepseek-chat`
+- `deepseek-instant`
 - `deepseek-expert`
 
 ## Limitations

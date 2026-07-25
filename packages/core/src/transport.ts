@@ -17,10 +17,6 @@ import type {
 const BASE_URL = "https://chat.deepseek.com";
 
 function modelToType(model: string): { model_type: string; thinking: boolean; search: boolean } {
-  const lower = model.toLowerCase();
-  if (lower.includes("search")) {
-    return { model_type: "default", thinking: true, search: true };
-  }
   return { model_type: "default", thinking: true, search: false };
 }
 
@@ -62,22 +58,18 @@ function cleanMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
   return deduped;
 }
 
-const NO_TOOLS_NOTE =
-  "\n\nNote: You cannot run commands, read files, or use any tools. Never describe what actions you would take. Answer the user's question directly using only the conversation above.";
 
 function flattenMessages(messages: OpenAIMessage[]): string {
   const cleaned = cleanMessages(messages);
-  return (
-    cleaned
-      .map((m) => {
-        const text = extractContent(m.content);
-        if (m.role === "system") return text;
-        if (m.role === "user") return `User: ${text}`;
-        if (m.role === "assistant") return `Assistant: ${text}`;
-        return text;
-      })
-      .join("\n\n") + NO_TOOLS_NOTE
-  );
+  return cleaned
+    .map((m) => {
+      const text = extractContent(m.content);
+      if (m.role === "system") return text;
+      if (m.role === "user") return `User: ${text}`;
+      if (m.role === "assistant") return `Assistant: ${text}`;
+      return text;
+    })
+    .join("\n\n");
 }
 
 function lastUserMessage(messages: OpenAIMessage[]): string {
@@ -118,7 +110,7 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
 async function handleModels(): Promise<Response> {
   const models = [
     {
-      id: "deepseek-chat",
+      id: "deepseek-instant",
       object: "model",
       created: Math.floor(Date.now() / 1000),
       owned_by: "deepseek",
