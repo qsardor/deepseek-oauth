@@ -87,7 +87,10 @@ const openai = new OpenAI({
 | `@deepseek-oauth/core` | Transport, SSE parser, PoW solver, types |
 | `@deepseek-oauth/local` | Browser auth (Playwright), credential storage |
 
-<<<<<<< HEAD
+## Session reuse
+
+Multi-turn conversations reuse the same chat session. The proxy returns an `x-deepseek-chat-session-id` response header — pass it back on subsequent requests to continue the conversation.
+
 ## Limitations
 
 - Tool calling is not supported (DeepSeek's internal API doesn't expose it).
@@ -95,8 +98,6 @@ const openai = new OpenAI({
 
 ---
 
-=======
->>>>>>> 03c5863419b8380a59ea8b46a71e25923ad7a866
 Inspired by [openai-oauth](https://github.com/EvanZhouDev/openai-oauth).
 
 deepseek-oauth is unofficial and not affiliated with DeepSeek. Treat your credentials like passwords. Provided as-is.
