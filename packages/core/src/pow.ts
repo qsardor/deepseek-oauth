@@ -141,14 +141,18 @@ export function deepSeekHashV1(input: Uint8Array): Uint8Array {
 export function solvePoW(challenge: PoWChallenge): PoWResponse {
   const prefix = `${challenge.salt}_${challenge.expire_at}_`;
   const prefixBytes = new TextEncoder().encode(prefix);
+  const maxDigits = String(challenge.difficulty).length;
+  const input = new Uint8Array(prefixBytes.length + maxDigits);
+  input.set(prefixBytes);
 
   for (let n = 0; n <= challenge.difficulty; n++) {
     const nStr = String(n);
-    const input = new Uint8Array(prefixBytes.length + nStr.length);
-    input.set(prefixBytes);
-    input.set(new TextEncoder().encode(nStr), prefixBytes.length);
+    const nOff = prefixBytes.length;
+    for (let d = 0; d < nStr.length; d++) {
+      input[nOff + d] = nStr.charCodeAt(d);
+    }
 
-    const hash = deepSeekHashV1(input);
+    const hash = deepSeekHashV1(input.subarray(0, nOff + nStr.length));
     const hex = bytesToHex(hash);
 
     if (hex === challenge.challenge) {
@@ -172,9 +176,5 @@ export function encodePowResponse(response: PoWResponse): string {
 }
 
 function bytesToHex(bytes: Uint8Array): string {
-  let hex = "";
-  for (const b of bytes) {
-    hex += b.toString(16).padStart(2, "0");
-  }
-  return hex;
+  return Buffer.from(bytes).toString("hex");
 }

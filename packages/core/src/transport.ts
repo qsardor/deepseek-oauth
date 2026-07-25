@@ -156,15 +156,11 @@ async function handleChatCompletions(
 
   const isStream = body.stream !== false;
 
-  let chatSessionId: string;
+  let chatSessionId = existingSessionId ?? "";
   let isReuse = false;
 
   if (existingSessionId) {
-    chatSessionId = existingSessionId;
     isReuse = true;
-  } else {
-    const chatSession = await createChatSession(session);
-    chatSessionId = chatSession.id;
   }
 
   const { images, hasImages } = extractImages(body.messages);
@@ -195,7 +191,15 @@ async function handleChatCompletions(
     prompt = "Describe this image.";
   }
 
-  const challenge = await requestPoWChallenge(session);
+  const [chatSession, challenge] = await Promise.all([
+    isReuse ? Promise.resolve(null) : createChatSession(session),
+    requestPoWChallenge(session),
+  ]);
+
+  if (chatSession) {
+    chatSessionId = chatSession.id;
+  }
+
   const powResponse = solvePoW(challenge);
   const powEncoded = encodePowResponse(powResponse);
 
@@ -328,7 +332,7 @@ async function uploadFile(
     const fileId = data.data.biz_data.id;
 
     for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, 500));
       const pollHeaders = buildHeaders(session);
       pollHeaders.cookie = buildCookieHeader(session.cookies, session.accessToken);
       const pollRes = await fetch(
