@@ -120,11 +120,8 @@ Set the model to `deepseek-v4` to get reasoning traces in the `reasoning_content
 - Each completion creates a new chat session. The proxy is stateless.
 - Only models available through the web chat are exposed.
 - Manual login without cookies may not work for all API calls.
-
-## Prior art
+---
 
 Inspired by [openai-oauth](https://github.com/EvanZhouDev/openai-oauth).
-
----
 
 deepseek-oauth is unofficial and not affiliated with DeepSeek. Treat your credentials like passwords. Provided as-is.
