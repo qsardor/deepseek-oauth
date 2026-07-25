@@ -3,7 +3,6 @@ import {
   buildCookieHeader,
   buildHeaders,
   createChatSession,
-  deleteChatSession,
 } from "./session.js";
 import { DeepSeekSSEParser } from "./sse.js";
 import type {
@@ -81,6 +80,15 @@ function flattenMessages(messages: OpenAIMessage[]): string {
   );
 }
 
+function lastUserMessage(messages: OpenAIMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      return extractContent(messages[i].content);
+    }
+  }
+  return "";
+}
+
 export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
   return {
     baseURL: "https://deepseek-oauth.local/v1",
@@ -98,7 +106,8 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
         const raw = body as unknown as Record<string, unknown>;
         raw.tools = undefined;
         raw.tool_choice = undefined;
-        return handleChatCompletions(body, credentials);
+        const existingSessionId = request.headers.get("x-deepseek-chat-session-id");
+        return handleChatCompletions(body, credentials, existingSessionId);
       }
 
       return new Response("Not Found", { status: 404 });
@@ -115,7 +124,7 @@ async function handleModels(): Promise<Response> {
       owned_by: "deepseek",
     },
     {
-      id: "deepseek-reasoner",
+      id: "deepseek-expert",
       object: "model",
       created: Math.floor(Date.now() / 1000),
       owned_by: "deepseek",
@@ -130,58 +139,71 @@ async function handleModels(): Promise<Response> {
 async function handleChatCompletions(
   body: OpenAIChatRequest,
   credentials: DeepSeekCredentials,
+  existingSessionId?: string | null,
 ): Promise<Response> {
   const session = await credentials.getSession();
   const { model_type, thinking, search } = modelToType(body.model);
-  const prompt = flattenMessages(body.messages);
   const isStream = body.stream !== false;
 
-  const chatSession = await createChatSession(session);
-  const chatSessionId = chatSession.id;
+  let chatSessionId: string;
+  let isReuse = false;
 
-  try {
-    const challenge = await requestPoWChallenge(session);
-    const powResponse = solvePoW(challenge);
-    const powEncoded = encodePowResponse(powResponse);
-
-    const completionBody = {
-      chat_session_id: chatSessionId,
-      parent_message_id: null,
-      prompt,
-      ref_file_ids: [],
-      thinking_enabled: thinking,
-      search_enabled: search,
-      action: null,
-      preempt: false,
-      model_type,
-    };
-
-    const headers = buildHeaders(session);
-    headers.cookie = buildCookieHeader(session.cookies);
-    headers["x-ds-pow-response"] = powEncoded;
-
-    const response = await fetch(`${BASE_URL}/api/v0/chat/completion`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(completionBody),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`DeepSeek completion failed: ${response.status} ${text}`);
-    }
-
-    if (!response.body) {
-      throw new Error("No response body from DeepSeek");
-    }
-
-    if (isStream) {
-      return handleStreamingResponse(response, body.model);
-    }
-    return handleNonStreamingResponse(response, body.model);
-  } finally {
-    await deleteChatSession(session, chatSessionId).catch(() => {});
+  if (existingSessionId) {
+    chatSessionId = existingSessionId;
+    isReuse = true;
+  } else {
+    const chatSession = await createChatSession(session);
+    chatSessionId = chatSession.id;
   }
+
+  const prompt = isReuse
+    ? `User: ${lastUserMessage(body.messages)}`
+    : flattenMessages(body.messages);
+
+  const challenge = await requestPoWChallenge(session);
+  const powResponse = solvePoW(challenge);
+  const powEncoded = encodePowResponse(powResponse);
+
+  const completionBody = {
+    chat_session_id: chatSessionId,
+    parent_message_id: null,
+    prompt,
+    ref_file_ids: [],
+    thinking_enabled: thinking,
+    search_enabled: search,
+    action: null,
+    preempt: false,
+    model_type,
+  };
+
+  const headers = buildHeaders(session);
+  headers.cookie = buildCookieHeader(session.cookies);
+  headers["x-ds-pow-response"] = powEncoded;
+
+  const response = await fetch(`${BASE_URL}/api/v0/chat/completion`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(completionBody),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`DeepSeek completion failed: ${response.status} ${text}`);
+  }
+
+  if (!response.body) {
+    throw new Error("No response body from DeepSeek");
+  }
+
+  let result: Response;
+  if (isStream) {
+    result = await handleStreamingResponse(response, body.model);
+  } else {
+    result = await handleNonStreamingResponse(response, body.model);
+  }
+
+  result.headers.set("x-deepseek-chat-session-id", chatSessionId);
+  return result;
 }
 
 async function requestPoWChallenge(session: DeepSeekSession): Promise<PoWChallenge> {

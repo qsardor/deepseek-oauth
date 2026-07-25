@@ -100,12 +100,11 @@ console.log(session.accessToken);
 ## Models
 
 - `deepseek-chat`
-- `deepseek-reasoner`
+- `deepseek-expert`
 
 ## Limitations
 
 - Tool calling is stripped from requests (DeepSeek's internal API doesn't support it).
-- Each completion creates a new chat session. The proxy is stateless.
 - Only models available through the web chat are exposed.
 ---
 

@@ -21,10 +21,11 @@ export interface ServerInstance {
 
 export async function startServer(options: ServerOptions): Promise<ServerInstance> {
   const transport = createDeepSeekTransport(deepSeekCredentials());
+  const sessions = new Map<string, string>();
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
-      await handleRequest(req, res, transport);
+      await handleRequest(req, res, transport, sessions);
     } catch (e) {
       if (e instanceof LoginRequired) {
         sendText(res, 401, "Not signed in to DeepSeek. Run `deepseek-oauth login` first.");
@@ -66,6 +67,7 @@ async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   transport: ReturnType<typeof createDeepSeekTransport>,
+  sessions: Map<string, string>,
 ): Promise<void> {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   const path = url.pathname;
@@ -89,20 +91,39 @@ async function handleRequest(
     }
 
     const body = await readBody(req);
+    const sessionKey = `${req.socket.remoteAddress}:${req.socket.remotePort}`;
+    const existingSessionId = req.headers["x-deepseek-chat-session-id"] as string
+      || sessions.get(sessionKey)
+      || undefined;
+
+    const requestHeaders: Record<string, string> = { "content-type": "application/json" };
+    if (existingSessionId) {
+      requestHeaders["x-deepseek-chat-session-id"] = existingSessionId;
+    }
+
     const response = await transport.fetch(
       new Request(`http://localhost${path}`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: requestHeaders,
         body,
       }),
     );
 
+    const responseSessionId = response.headers.get("x-deepseek-chat-session-id");
+    if (responseSessionId) {
+      sessions.set(sessionKey, responseSessionId);
+    }
+
     if (response.headers.get("content-type")?.includes("text/event-stream")) {
-      res.writeHead(response.status, {
+      const outHeaders: Record<string, string> = {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
         connection: "keep-alive",
-      });
+      };
+      if (responseSessionId) {
+        outHeaders["x-deepseek-chat-session-id"] = responseSessionId;
+      }
+      res.writeHead(response.status, outHeaders);
 
       if (!response.body) {
         sendText(res, 500, "No response body from DeepSeek");
@@ -132,8 +153,13 @@ async function handleRequest(
         res.end();
       }
     } else {
+      const jsonHeaders: Record<string, string> = { "content-type": "application/json" };
+      if (responseSessionId) {
+        jsonHeaders["x-deepseek-chat-session-id"] = responseSessionId;
+      }
       const data = await response.json();
-      sendJson(res, response.status, data);
+      res.writeHead(response.status, jsonHeaders);
+      res.end(JSON.stringify(data));
     }
     return;
   }

@@ -19,10 +19,6 @@ export async function loginViaBrowser(): Promise<DeepSeekSession> {
 
     const page = await context.newPage();
 
-    console.log("\nOpening browser to sign in to DeepSeek...");
-    console.log("Please sign in at chat.deepseek.com in the opened browser window.");
-    console.log("The process will continue automatically once you're signed in.\n");
-
     await page.goto(DEEPSEEK_URL, { waitUntil: "networkidle", timeout: 60000 });
 
     try {
