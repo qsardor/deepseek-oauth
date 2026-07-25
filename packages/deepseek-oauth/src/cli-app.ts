@@ -6,6 +6,7 @@ import { startServer } from "./server.js";
 export async function main(): Promise<void> {
   const argv = await yargs(hideBin(process.argv))
     .scriptName("deepseek-oauth")
+    .version("0.1.0")
     .usage("$0 [command]")
     .command(
       "serve",
@@ -26,13 +27,9 @@ export async function main(): Promise<void> {
     .command(
       "login",
       "Sign in to DeepSeek in your browser",
-      (yargs) =>
-        yargs.option("manual", {
-          type: "boolean",
-          describe: "Manually paste your token instead of opening a browser",
-        }),
-      async (args) => {
-        await startLogin({ manual: args.manual ?? false });
+      () => {},
+      async () => {
+        await startLogin();
       },
     )
     .demandCommand(

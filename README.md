@@ -11,7 +11,7 @@ $ npx deepseek-oauth serve
 
 ## How it works
 
-Sign in once via your browser, then `deepseek-oauth` proxies OpenAI-format requests to DeepSeek's internal API. It handles the proof-of-work challenges, SSE streaming, and message translation so any tool that speaks the OpenAI protocol just works.
+Sign in once via your browser, then run the proxy. That's it.
 
 ```sh
 npx deepseek-oauth login    # sign in once (opens your browser)
@@ -89,16 +89,6 @@ console.log(session.accessToken);
 | `@deepseek-oauth/core` | Transport, SSE parser, PoW solver, types | none |
 | `@deepseek-oauth/local` | Browser auth (Playwright), credential storage | core |
 
-## Manual login (no browser automation)
-
-If Playwright isn't available or you prefer to extract credentials yourself:
-
-```sh
-npx deepseek-oauth login --manual
-```
-
-Paste a JSON blob with your token and cookies, or just the raw token.
-
 ## Endpoints
 
 | Path | Method | Description |
@@ -109,17 +99,16 @@ Paste a JSON blob with your token and cookies, or just the raw token.
 
 ## Models
 
-- `deepseek-flash`: flash chat model
+- `deepseek-chat`: chat model
 - `deepseek-reasoner`: V4 with reasoning traces (DeepThink)
 
-Set the model to `deepseek-v4` to get reasoning traces in the `reasoning_content` delta field.
+Set the model to `deepseek-reasoner` to get reasoning traces in the `reasoning_content` delta field.
 
 ## Limitations
 
 - Tool calling is stripped from requests (DeepSeek's internal API doesn't support it).
 - Each completion creates a new chat session. The proxy is stateless.
 - Only models available through the web chat are exposed.
-- Manual login without cookies may not work for all API calls.
 ---
 
 Inspired by [openai-oauth](https://github.com/EvanZhouDev/openai-oauth).

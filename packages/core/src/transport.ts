@@ -109,7 +109,7 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
 async function handleModels(): Promise<Response> {
   const models = [
     {
-      id: "deepseek-flash",
+      id: "deepseek-chat",
       object: "model",
       created: Math.floor(Date.now() / 1000),
       owned_by: "deepseek",
