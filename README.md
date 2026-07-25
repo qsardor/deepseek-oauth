@@ -133,12 +133,6 @@ const openai = new OpenAI({
 | `@deepseek-oauth/core` | Transport, SSE parser, PoW solver, file upload, types |
 | `@deepseek-oauth/local` | Browser auth (Playwright), credential storage |
 
-## Limitations
-
-- Tool calling is not supported (DeepSeek's internal API doesn't expose it).
-- Only models available through the web chat are exposed.
-- Image uploads require the proxy to solve an additional PoW challenge per file.
-
 ---
 
 Inspired by [openai-oauth](https://github.com/EvanZhouDev/openai-oauth).
