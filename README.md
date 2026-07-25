@@ -102,12 +102,6 @@ console.log(session.accessToken);
 - `deepseek-instant`
 - `deepseek-expert`
 
-## Limitations
-
-- Tool calling is stripped from requests (DeepSeek's internal API doesn't support it).
-- Only models available through the web chat are exposed.
----
-
 Inspired by [openai-oauth](https://github.com/EvanZhouDev/openai-oauth).
 
 deepseek-oauth is unofficial and not affiliated with DeepSeek. Treat your credentials like passwords. Provided as-is.
