@@ -112,7 +112,7 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
         raw.tools = undefined;
         raw.tool_choice = undefined;
         const existingSessionId = request.headers.get("x-deepseek-chat-session-id");
-        return handleChatCompletions(body, credentials, existingSessionId, messageIds);
+        return handleChatCompletions(body, credentials, existingSessionId, messageIds, request.signal);
       }
 
       return new Response("Not Found", { status: 404 });
@@ -139,6 +139,7 @@ async function handleChatCompletions(
   credentials: DeepSeekCredentials,
   existingSessionId?: string | null,
   messageIds?: Map<string, number>,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const session = await credentials.getSession();
   const config = resolveModel(body.model);
@@ -224,6 +225,7 @@ async function handleChatCompletions(
     method: "POST",
     headers,
     body: JSON.stringify(completionBody),
+    signal,
   });
 
   if (!response.ok) {
@@ -237,7 +239,7 @@ async function handleChatCompletions(
 
   let result: Response;
   if (isStream) {
-    result = await handleStreamingResponse(response, body.model, chatSessionId, messageIds);
+    result = await handleStreamingResponse(response, body.model, chatSessionId, messageIds, signal);
   } else {
     result = await handleNonStreamingResponse(
       response,
@@ -377,6 +379,7 @@ async function requestPoWChallengeForTarget(
     method: "POST",
     headers,
     body: JSON.stringify({ target_path: targetPath }),
+    signal: AbortSignal.timeout(30000),
   });
 
   if (!response.ok) {
@@ -411,6 +414,7 @@ async function handleStreamingResponse(
   model: string,
   chatSessionId: string,
   messageIds?: Map<string, number>,
+  signal?: AbortSignal,
 ): Promise<Response> {
   if (!deepseekResponse.body) {
     throw new Error("No response body from DeepSeek");
@@ -515,6 +519,11 @@ async function handleStreamingResponse(
 
       try {
         while (true) {
+          if (signal?.aborted) {
+            debug("stream aborted by client, id:", id);
+            await reader.cancel();
+            break;
+          }
           const { done, value } = await reader.read();
           if (done) break;
           totalBytes += value.length;

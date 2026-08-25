@@ -22,6 +22,31 @@ export interface ServerInstance {
   close(): void;
 }
 
+class Mutex {
+  private queue: ((release: () => void) => void)[] = [];
+  private locked = false;
+
+  async lock(): Promise<() => void> {
+    return new Promise((resolve) => {
+      this.queue.push(resolve);
+      this.dispatch();
+    });
+  }
+
+  private dispatch() {
+    if (this.locked) return;
+    const next = this.queue.shift();
+    if (next) {
+      this.locked = true;
+      next(() => {
+        this.locked = false;
+        this.dispatch();
+      });
+    }
+  }
+}
+const requestMutex = new Mutex();
+
 export async function startServer(options: ServerOptions): Promise<ServerInstance> {
   const credentials = deepSeekCredentials();
   const transport = createDeepSeekTransport(credentials);
@@ -36,6 +61,7 @@ export async function startServer(options: ServerOptions): Promise<ServerInstanc
       return;
     }
     activeRequests++;
+    const release = await requestMutex.lock();
     try {
       await handleRequest(req, res, transport, sessions, sessionTimestamps);
     } catch (e) {
@@ -47,6 +73,7 @@ export async function startServer(options: ServerOptions): Promise<ServerInstanc
       console.error("DeepSeek Error:", e);
       sendText(res, 500, `Internal server error: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
+      release();
       activeRequests--;
     }
   });
@@ -171,6 +198,11 @@ async function handleRequest(
   sessions: Map<string, string>,
   sessionTimestamps: Map<string, number>,
 ): Promise<void> {
+  const controller = new AbortController();
+  req.on("close", () => {
+    controller.abort();
+  });
+
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   const path = url.pathname;
 
@@ -180,7 +212,7 @@ async function handleRequest(
   }
 
   if (path === "/v1/models" || path === "/models") {
-    const response = await transport.fetch(new Request(`http://localhost${path}`));
+    const response = await transport.fetch(new Request(`http://localhost${path}`, { signal: controller.signal }));
     const data = await response.json();
     sendJson(res, response.status, data);
     return;
@@ -209,6 +241,7 @@ async function handleRequest(
         method: "POST",
         headers: requestHeaders,
         body,
+        signal: controller.signal,
       }),
     );
 
