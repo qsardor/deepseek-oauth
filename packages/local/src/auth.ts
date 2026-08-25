@@ -19,20 +19,13 @@ export async function loginViaBrowser(): Promise<DeepSeekSession> {
 
     const page = await context.newPage();
 
-    await page.goto(DEEPSEEK_URL, { waitUntil: "networkidle", timeout: 60000 });
+    await page.goto(DEEPSEEK_URL, { waitUntil: "domcontentloaded", timeout: 0 }).catch(() => {
+      // Ignore if user manually navigates away during load
+    });
 
-    try {
-      await page.waitForURL(
-        (url) => url.href.startsWith(DEEPSEEK_URL) && !url.href.includes("/sign_in"),
-        { timeout: 300000 },
-      );
-    } catch {
-      console.log("Proceeding with current page state...");
-    }
+    console.log("Waiting for successful login (you can take your time)...");
 
-    await page.waitForTimeout(2000);
-
-    const token = await page.evaluate(() => {
+    const token = await page.waitForFunction(() => {
       try {
         const raw = localStorage.getItem("userToken");
         if (!raw) return null;
@@ -41,7 +34,7 @@ export async function loginViaBrowser(): Promise<DeepSeekSession> {
       } catch {
         return null;
       }
-    });
+    }, { timeout: 0 }).then((handle) => handle.jsonValue());
 
     if (!token) {
       throw new Error(
