@@ -18,6 +18,7 @@ function loadWasm(): typeof wasmSolve {
   const buf = readFileSync(wasmPath);
   const mod = new WebAssembly.Module(buf);
   const instance = new WebAssembly.Instance(mod, {});
+  if (typeof instance.exports.solve_pow !== "function") return null;
   const mem = instance.exports.memory as WebAssembly.Memory;
   const memBuf = new Uint8Array(mem.buffer);
   const enc = new TextEncoder();
