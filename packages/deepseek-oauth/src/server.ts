@@ -44,7 +44,8 @@ export async function startServer(options: ServerOptions): Promise<ServerInstanc
         return;
       }
       debug("Request error:", e instanceof Error ? e.message : String(e));
-      sendText(res, 500, "Internal server error");
+      console.error("DeepSeek Error:", e);
+      sendText(res, 500, `Internal server error: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       activeRequests--;
     }
