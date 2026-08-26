@@ -1,4 +1,4 @@
-import { encodePowResponse, solvePoW } from "./pow.js";
+import { encodePowResponse, solvePoWAsync } from "./pow.js";
 import { buildCookieHeader, buildHeaders, createChatSession } from "./session.js";
 import { DeepSeekSSEParser } from "./sse.js";
 import type {
@@ -44,11 +44,15 @@ function extractContent(content: string | { type: string; text?: string }[] | nu
 function cleanMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
   const cleaned: OpenAIMessage[] = [];
   for (const m of messages) {
-    if (m.role === "tool") continue;
+    if (m.role === "tool") {
+      cleaned.push({ role: "user", content: `[Tool Result]:\n${extractContent(m.content)}` });
+      continue;
+    }
     if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
-      if (!m.content) continue;
-      const { tool_calls: _, ...rest } = m;
-      cleaned.push(rest as OpenAIMessage);
+      const callsText = m.tool_calls.map((c: any) => `[Tool Call]: ${c.function.name}(${c.function.arguments})`).join("\n");
+      const text = extractContent(m.content);
+      const combined = text ? `${text}\n${callsText}` : callsText;
+      cleaned.push({ role: "assistant", content: combined });
       continue;
     }
     const { tool_calls: _, ...rest } = m;
@@ -75,9 +79,9 @@ function flattenMessages(messages: OpenAIMessage[]): string {
   return cleaned
     .map((m) => {
       const text = extractContent(m.content);
-      if (m.role === "system") return text;
-      if (m.role === "user") return `User: ${text}`;
-      if (m.role === "assistant") return `Assistant: ${text}`;
+      if (m.role === "system") return `[System Instruction]:\n${text}`;
+      if (m.role === "user") return text; // DeepSeek handles user/assistant natively
+      if (m.role === "assistant") return text;
       return text;
     })
     .join("\n\n");
@@ -144,6 +148,16 @@ async function handleChatCompletions(
   const session = await credentials.getSession();
   const config = resolveModel(body.model);
 
+  if (body.tools && body.tools.length > 0) {
+    const toolsStr = JSON.stringify(body.tools, null, 2);
+    const instructions = `You have access to the following tools:\n${toolsStr}\nTo use a tool, output a JSON object representing the tool call.`;
+    if (body.messages.length > 0 && body.messages[0].role === "system") {
+      body.messages[0].content = `${body.messages[0].content}\n\n${instructions}`;
+    } else {
+      body.messages.unshift({ role: "system", content: instructions });
+    }
+  }
+
   const raw = body as unknown as Record<string, unknown>;
   const extraBody = (raw.extra_body ?? raw.thinking_body ?? {}) as Record<string, unknown>;
   const thinking =
@@ -196,7 +210,7 @@ async function handleChatCompletions(
     chatSessionId = chatSession.id;
   }
 
-  const powResponse = solvePoW(challenge);
+  const powResponse = await solvePoWAsync(challenge);
   const powEncoded = encodePowResponse(powResponse);
 
   const parentMessageId =
@@ -307,7 +321,7 @@ async function uploadFile(
   modelType: string,
 ): Promise<string | null> {
   const challenge = await requestPoWChallengeForTarget(session, "/api/v0/file/upload_file");
-  const powResponse = solvePoW(challenge);
+  const powResponse = await solvePoWAsync(challenge);
   const powEncoded = encodePowResponse(powResponse);
 
   const boundary = `--deepseek-upload-${Date.now()}`;

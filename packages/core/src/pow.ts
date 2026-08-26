@@ -1,9 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { PoWChallenge, PoWResponse } from "./types.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { WASM_B64 } from "./wasm-b64.js";
 
 let wasmSolve:
   | ((salt: string, expireAt: number, difficulty: number, target: string) => number)
@@ -12,14 +9,17 @@ let wasmSolve:
 function loadWasm(): typeof wasmSolve {
   if (wasmSolve) return wasmSolve;
 
-  const wasmPath = join(__dirname, "..", "solver.wasm");
-  if (!existsSync(wasmPath)) return null;
+  const buf = Buffer.from(WASM_B64, "base64");
+  try {
+    const mod = new WebAssembly.Module(buf);
+    const instance = new WebAssembly.Instance(mod, {});
+    if (typeof instance.exports.solve_pow !== "function") {
+      console.log("WASM: solve_pow function not found");
+      return null;
+    }
+    const mem = instance.exports.memory as WebAssembly.Memory;
+    console.log("WASM PoW solver successfully initialized!");
 
-  const buf = readFileSync(wasmPath);
-  const mod = new WebAssembly.Module(buf);
-  const instance = new WebAssembly.Instance(mod, {});
-  if (typeof instance.exports.solve_pow !== "function") return null;
-  const mem = instance.exports.memory as WebAssembly.Memory;
   const memBuf = new Uint8Array(mem.buffer);
   const enc = new TextEncoder();
 
@@ -49,6 +49,10 @@ function loadWasm(): typeof wasmSolve {
   };
 
   return wasmSolve;
+  } catch (e) {
+    console.error("WASM load error:", e);
+    return null;
+  }
 }
 
 const RATE = 136;
@@ -212,6 +216,29 @@ export function solvePoW(challenge: PoWChallenge): PoWResponse {
     signature: challenge.signature,
     target_path: challenge.target_path,
   };
+}
+
+import { Worker } from "node:worker_threads";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export async function solvePoWAsync(challenge: PoWChallenge): Promise<PoWResponse> {
+  return new Promise((resolve, reject) => {
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const workerPath = join(__dirname, "pow.worker.js");
+    
+    const worker = new Worker(workerPath);
+    worker.on("message", (msg) => {
+      if (msg.success) resolve(msg.response);
+      else reject(new Error(msg.error));
+      worker.terminate();
+    });
+    worker.on("error", (err) => {
+      reject(err);
+      worker.terminate();
+    });
+    worker.postMessage(challenge);
+  });
 }
 
 function solvePoWJS(challenge: PoWChallenge): number {
