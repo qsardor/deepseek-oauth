@@ -150,7 +150,7 @@ async function handleChatCompletions(
 
   if (body.tools && body.tools.length > 0) {
     const toolsStr = JSON.stringify(body.tools, null, 2);
-    const instructions = `You have access to the following tools:\n${toolsStr}\nTo use a tool, output a JSON object representing the tool call.`;
+    const instructions = `You have access to the following tools:\n${toolsStr}\nTo use a tool, you MUST output a JSON object wrapped in <tool_call> tags. Example: <tool_call>{"name": "...", "arguments": "{...}"}</tool_call>. Do not output anything else if using a tool.`;
     if (body.messages.length > 0 && body.messages[0].role === "system") {
       body.messages[0].content = `${body.messages[0].content}\n\n${instructions}`;
     } else {
@@ -450,6 +450,9 @@ async function handleStreamingResponse(
       let totalBytes = 0;
       let contentBuffer = "";
       let reasoningBuffer = "";
+      let toolCallBuffer = "";
+      let isToolCall = false;
+      let checkedToolCall = false;
       let lastFlushTime = Date.now();
 
       let streamClosed = false;
@@ -516,6 +519,47 @@ async function handleStreamingResponse(
         contentBuffer += content;
         reasoningBuffer += reasoning;
         totalOutputLength += content.length + reasoning.length;
+
+        if (!checkedToolCall && contentBuffer.length > 0) {
+          if (contentBuffer.startsWith("<tool_call>")) {
+            isToolCall = true;
+          } else if (contentBuffer.length > 15) {
+            checkedToolCall = true;
+          }
+        }
+
+        if (isToolCall) {
+          toolCallBuffer += content;
+          contentBuffer = "";
+          
+          if (done) {
+            const cleanedJson = toolCallBuffer.replace("<tool_call>", "").replace("</tool_call>", "").trim();
+            let parsedCall;
+            try {
+              parsedCall = JSON.parse(cleanedJson);
+            } catch (e) {
+              const delta: OpenAIChatChunk["choices"][0]["delta"] = { content: toolCallBuffer };
+              const chunk: OpenAIChatChunk = { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: null }] };
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+              return;
+            }
+
+            const delta: OpenAIChatChunk["choices"][0]["delta"] = {
+              tool_calls: [{
+                index: 0,
+                id: `call_${Date.now()}`,
+                type: "function",
+                function: {
+                  name: parsedCall.name || "unknown",
+                  arguments: typeof parsedCall.arguments === "string" ? parsedCall.arguments : JSON.stringify(parsedCall.arguments || {})
+                }
+              }]
+            };
+            const chunk: OpenAIChatChunk = { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: null }] };
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+          }
+          return;
+        }
 
         const hasPending = contentBuffer.length > 0 || reasoningBuffer.length > 0;
         const shouldFlush =
@@ -633,6 +677,25 @@ async function handleNonStreamingResponse(
     role: "assistant",
     content: fullContent,
   };
+
+  if (fullContent.trim().startsWith("<tool_call>")) {
+    const cleanedJson = fullContent.replace("<tool_call>", "").replace("</tool_call>", "").trim();
+    try {
+      const parsedCall = JSON.parse(cleanedJson);
+      message.content = null;
+      message.tool_calls = [{
+        id: `call_${Date.now()}`,
+        type: "function",
+        function: {
+          name: parsedCall.name || "unknown",
+          arguments: typeof parsedCall.arguments === "string" ? parsedCall.arguments : JSON.stringify(parsedCall.arguments || {})
+        }
+      }];
+    } catch (e) {
+      // Ignore and fallback to text
+    }
+  }
+
   if (fullReasoning) {
     message.reasoning_content = fullReasoning;
   }
