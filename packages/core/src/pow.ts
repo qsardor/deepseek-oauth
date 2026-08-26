@@ -13,7 +13,8 @@ function loadWasm(): typeof wasmSolve {
   try {
     const mod = new WebAssembly.Module(buf);
     const instance = new WebAssembly.Instance(mod, {});
-    if (typeof instance.exports.solve_pow !== "function") {
+    const solveFunc = instance.exports.solve_pow_opt || instance.exports.solve_pow;
+    if (typeof solveFunc !== "function") {
       console.log("WASM: solve_pow function not found");
       return null;
     }
@@ -36,7 +37,7 @@ function loadWasm(): typeof wasmSolve {
     buf2.set(saltBytes, 0);
     buf2.set(targetBytes, 256);
 
-    const answer = (instance.exports.solve_pow as CallableFunction)(
+    const answer = (solveFunc as CallableFunction)(
       0,
       saltBytes.length,
       BigInt(expireAt),
