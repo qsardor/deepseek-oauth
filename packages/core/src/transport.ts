@@ -549,6 +549,11 @@ async function handleStreamingResponse(
             isToolCall = true;
             contentBuffer = contentBuffer.slice(contentBuffer.indexOf("<tool_call>"));
             checkedToolCall = true;
+          } else if (contentBuffer.includes("<use_mcp_tool>")) {
+            // Hermes MCP tool format
+            isToolCall = true;
+            contentBuffer = contentBuffer.slice(contentBuffer.indexOf("<use_mcp_tool>"));
+            checkedToolCall = true;
           } else if (contentBuffer.includes("Action:")) {
             // Also catch the LangChain/ReAct format it learned from training data
             isToolCall = true;
@@ -566,13 +571,40 @@ async function handleStreamingResponse(
           if (done) {
             let parsedCall: any = null;
 
-            // Strategy 1: XML parsing
+            // Strategy 1: XML parsing (<tool_call>)
             if (toolCallBuffer.includes("<tool_call>")) {
               const match = toolCallBuffer.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
               const rawJson = match ? match[1].trim() : toolCallBuffer.replace(/<tool_call>/g, "").replace(/<\/tool_call>/g, "").trim();
               try { parsedCall = JSON.parse(rawJson); } catch {}
             }
-            // Strategy 2: ReAct parsing (Action: name \n Action Input: {...})
+            // Strategy 2: Hermes MCP XML (<use_mcp_tool>)
+            else if (toolCallBuffer.includes("<use_mcp_tool>")) {
+              const serverMatch = toolCallBuffer.match(/<server_name>(.*?)<\/server_name>/);
+              const toolMatch = toolCallBuffer.match(/<tool_name>(.*?)<\/tool_name>/);
+              const argsMatch = toolCallBuffer.match(/<arguments>([\s\S]*?)<\/arguments>/);
+              
+              if (toolMatch && argsMatch) {
+                // Combine server_name and tool_name if necessary, or just use tool_name 
+                // For OpenAI format, we usually just pass the tool_name. If Hermes prefixes it, we need to handle that.
+                // Looking at typical MCP implementations via OpenAI, the function name is usually `<server>__<tool>`.
+                // Let's check how Hermes maps it. Usually it expects the raw JSON function call.
+                // Wait! If Hermes explicitly asked for <use_mcp_tool>, maybe we should just return it as text and Hermes will parse it natively?
+                // YES! If Hermes parses <use_mcp_tool> itself from the text response, we DON'T need to translate it into an OpenAI tool_call!
+                // Wait... if Hermes parsed it from text natively, why didn't it execute the tool in my previous log?
+                // Let's review the previous log: Hermes printed it out as a text response and ended the session!
+                // Ah, Hermes natively parses OpenAI `tool_calls` array for executing tools. The <use_mcp_tool> format is just what DeepSeek chose to output because it saw it in the system prompt. But Hermes EXPECTS an OpenAI tool_calls chunk.
+                // Let's translate it!
+                let name = toolMatch[1].trim();
+                if (serverMatch) name = `mcp__${serverMatch[1].trim()}__${name}`;
+                
+                try {
+                  const args = argsMatch[1].trim();
+                  JSON.parse(args); // validate
+                  parsedCall = { name, arguments: args };
+                } catch {}
+              }
+            }
+            // Strategy 3: ReAct parsing (Action: name \n Action Input: {...})
             else if (toolCallBuffer.includes("Action:")) {
               const actionMatch = toolCallBuffer.match(/Action:\s*([^\n]+)/);
               const inputMatch = toolCallBuffer.match(/Action Input:\s*([\s\S]+)/);
