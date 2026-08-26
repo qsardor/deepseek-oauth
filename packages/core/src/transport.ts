@@ -179,19 +179,22 @@ STRICT OUTPUT FORMAT RULES:
     if (body.messages.length > 0 && body.messages[0].role === "system") {
       let sysPrompt = body.messages[0].content;
 
-      // 1. Strip Hermes / Anthropic MCP XML instructions
-      sysPrompt = sysPrompt.replace(/<use_mcp_tool>[\s\S]*?<\/use_mcp_tool>/g, "");
-      sysPrompt = sysPrompt.replace(/In this environment you have access to a set of tools[\s\S]*?(?=\n\n|$)/i, "");
-      sysPrompt = sysPrompt.replace(/You can use one tool per message[\s\S]*?(?=\n\n|$)/i, "");
+      if (typeof sysPrompt === "string") {
+        // 1. Strip Hermes / Anthropic MCP XML instructions
+        sysPrompt = sysPrompt.replace(/<use_mcp_tool>[\s\S]*?<\/use_mcp_tool>/g, "");
+        sysPrompt = sysPrompt.replace(/In this environment you have access to a set of tools[\s\S]*?(?=\n\n|$)/i, "");
+        sysPrompt = sysPrompt.replace(/You can use one tool per message[\s\S]*?(?=\n\n|$)/i, "");
 
-      // 2. Strip standard LangChain/ReAct format instructions
-      sysPrompt = sysPrompt.replace(/Use the following format:[\s\S]*?Thought:[\s\S]*?Action:[\s\S]*?Action Input:[\s\S]*?(?=\n\n|$)/i, "");
-      
-      // 3. Strip any general "format your output as XML" or "format as JSON" that conflicts with us
-      sysPrompt = sysPrompt.replace(/Please format your output as.*?xml.*?/gi, "");
+        // 2. Strip standard LangChain/ReAct format instructions
+        sysPrompt = sysPrompt.replace(/Use the following format:[\s\S]*?Thought:[\s\S]*?Action:[\s\S]*?Action Input:[\s\S]*?(?=\n\n|$)/i, "");
+        
+        // 3. Strip any general "format your output as XML" or "format as JSON" that conflicts with us
+        sysPrompt = sysPrompt.replace(/Please format your output as.*?xml.*?/gi, "");
 
-      // PREPEND our strict instructions, and append the sanitized original context
-      body.messages[0].content = `${instructions}\n\n[USER SYSTEM PROMPT (SANITIZED)]\n${sysPrompt.trim()}`;
+        body.messages[0].content = `${instructions}\n\n[USER SYSTEM PROMPT (SANITIZED)]\n${sysPrompt.trim()}`;
+      } else {
+        body.messages.unshift({ role: "system", content: instructions });
+      }
     } else {
       body.messages.unshift({ role: "system", content: instructions });
     }
