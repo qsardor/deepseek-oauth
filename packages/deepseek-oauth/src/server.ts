@@ -199,8 +199,13 @@ async function handleRequest(
   sessionTimestamps: Map<string, number>,
 ): Promise<void> {
   const controller = new AbortController();
-  req.on("close", () => {
+  req.on("aborted", () => {
     controller.abort();
+  });
+  res.on("close", () => {
+    if (!res.writableEnded) {
+      controller.abort();
+    }
   });
 
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
