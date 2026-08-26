@@ -253,7 +253,7 @@ async function handleChatCompletions(
 
   let result: Response;
   if (isStream) {
-    result = await handleStreamingResponse(response, body.model, chatSessionId, messageIds, signal);
+    result = await handleStreamingResponse(response, body.model, chatSessionId, messageIds, signal, prompt);
   } else {
     result = await handleNonStreamingResponse(
       response,
@@ -429,6 +429,7 @@ async function handleStreamingResponse(
   chatSessionId: string,
   messageIds?: Map<string, number>,
   signal?: AbortSignal,
+  prompt?: string,
 ): Promise<Response> {
   if (!deepseekResponse.body) {
     throw new Error("No response body from DeepSeek");
@@ -445,6 +446,7 @@ async function handleStreamingResponse(
     async start(controller) {
       let streamStarted = false;
       let streamFinished = false;
+      let totalOutputLength = 0;
       let totalBytes = 0;
       let contentBuffer = "";
       let reasoningBuffer = "";
@@ -474,6 +476,22 @@ async function handleStreamingResponse(
           choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
         };
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(final)}\n\n`));
+
+        const pLen = prompt?.length || 0;
+        const usageChunk = {
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model,
+          choices: [],
+          usage: {
+            prompt_tokens: Math.ceil(pLen / 3),
+            completion_tokens: Math.ceil(totalOutputLength / 3),
+            total_tokens: Math.ceil((pLen + totalOutputLength) / 3),
+          }
+        };
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(usageChunk)}\n\n`));
+
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       };
@@ -497,6 +515,7 @@ async function handleStreamingResponse(
 
         contentBuffer += content;
         reasoningBuffer += reasoning;
+        totalOutputLength += content.length + reasoning.length;
 
         const hasPending = contentBuffer.length > 0 || reasoningBuffer.length > 0;
         const shouldFlush =
