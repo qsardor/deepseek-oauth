@@ -34,7 +34,7 @@ export async function loginViaBrowser(): Promise<DeepSeekSession> {
       } catch {
         return null;
       }
-    }, { timeout: 0 }).then((handle) => handle.jsonValue());
+    }, undefined, { timeout: 0 }).then((handle) => handle.jsonValue());
 
     if (!token) {
       throw new Error(
