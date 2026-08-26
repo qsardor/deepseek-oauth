@@ -1,11 +1,18 @@
 import { login as doLogin, loadCredentials } from "@deepseek-oauth/local";
+import * as readline from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 
-export async function startLogin(): Promise<void> {
+export async function startLogin(force: boolean = false): Promise<void> {
   const existing = await loadCredentials();
-  if (existing) {
-    console.log("\nYou are already logged in!");
-    console.log("If you want to sign in with a different account, delete the `~/.deepseek-oauth/auth.json` file first.\n");
-    return;
+  if (existing && !force) {
+    const rl = readline.createInterface({ input, output });
+    const answer = await rl.question("\nYou are already logged in! Do you want to overwrite your existing login? (y/N): ");
+    rl.close();
+    
+    if (answer.trim().toLowerCase() !== "y") {
+      console.log("Login cancelled.\n");
+      return;
+    }
   }
 
   console.log("\nOpening browser to sign in to DeepSeek...\n");

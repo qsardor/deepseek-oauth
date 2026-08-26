@@ -36,9 +36,15 @@ export async function main(): Promise<void> {
     .command(
       "login",
       "Sign in to DeepSeek in your browser",
-      () => {},
-      async () => {
-        await startLogin();
+      (yargs) =>
+        yargs.option("force", {
+          alias: "y",
+          type: "boolean",
+          default: false,
+          describe: "Force login (overwrite existing session without prompting)",
+        }),
+      async (args) => {
+        await startLogin(args.force);
       },
     )
     .demandCommand(
