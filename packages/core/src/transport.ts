@@ -164,7 +164,7 @@ async function handleChatCompletions(
     extraBody.thinking !== undefined ? Boolean(extraBody.thinking) : config.defaultThinking;
   const search = extraBody.search !== undefined ? Boolean(extraBody.search) : config.defaultSearch;
 
-  const isStream = body.stream !== false;
+  const isStream = body.stream === true;
 
   let chatSessionId = existingSessionId ?? "";
   let isReuse = false;
