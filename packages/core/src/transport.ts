@@ -149,10 +149,34 @@ async function handleChatCompletions(
   const config = resolveModel(body.model);
 
   if (body.tools && body.tools.length > 0) {
-    const toolsStr = JSON.stringify(body.tools, null, 2);
-    const instructions = `You have access to the following tools:\n${toolsStr}\nTo use a tool, you MUST output a JSON object wrapped in <tool_call> tags. Example: <tool_call>{"name": "...", "arguments": "{...}"}</tool_call>. Do not output anything else if using a tool.`;
+    // Disable DeepSeek's own web search so it doesn't answer from memory instead of using tools
+    const raw2 = body as unknown as Record<string, unknown>;
+    raw2.search = false;
+
+    const toolDefs = body.tools.map((t: any) => {
+      const fn = t.function || t;
+      return `- ${fn.name}: ${fn.description || "no description"}\n  Parameters: ${JSON.stringify(fn.parameters || {})}`;
+    }).join("\n");
+
+    const instructions = `You are an autonomous agent. You MUST use the provided tools to answer questions — NEVER answer from memory or general knowledge.
+
+STRICT RULES:
+1. If you need to read a file, run a command, search the web, or do ANYTHING — use a tool.
+2. NEVER say "I cannot access files" or "I don't have the ability". You DO have tools.
+3. NEVER answer from knowledge. ALWAYS call a tool first.
+4. Your ONLY valid response formats are:
+   a) A tool call: <tool_call>{"name": "tool_name", "arguments": {"arg": "value"}}</tool_call>
+   b) A final answer AFTER you have received tool results: plain text.
+5. If you want to say "let me check" — DON'T. Just call the tool immediately with NO preamble text.
+
+AVAILABLE TOOLS:
+${toolDefs}
+
+TOOL CALL FORMAT (use EXACTLY this, nothing before or after):
+<tool_call>{"name": "TOOL_NAME", "arguments": {"PARAM": "VALUE"}}</tool_call>`;
+
     if (body.messages.length > 0 && body.messages[0].role === "system") {
-      body.messages[0].content = `${body.messages[0].content}\n\n${instructions}`;
+      body.messages[0].content = `${instructions}\n\n---\nOriginal instructions:\n${body.messages[0].content}`;
     } else {
       body.messages.unshift({ role: "system", content: instructions });
     }
@@ -476,7 +500,7 @@ async function handleStreamingResponse(
           object: "chat.completion.chunk",
           created,
           model,
-          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          choices: [{ index: 0, delta: {}, finish_reason: isToolCall ? ("tool_calls" as any) : "stop" }],
         };
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(final)}\n\n`));
 
@@ -520,30 +544,36 @@ async function handleStreamingResponse(
         reasoningBuffer += reasoning;
         totalOutputLength += content.length + reasoning.length;
 
-        if (!checkedToolCall && contentBuffer.length > 0) {
-          if (contentBuffer.startsWith("<tool_call>")) {
-            isToolCall = true;
-          } else if (contentBuffer.length > 15) {
-            checkedToolCall = true;
-          }
+        if (!isToolCall && contentBuffer.includes("<tool_call>")) {
+          isToolCall = true;
+          // Strip any preamble text that came before the tool call tag
+          const tagIdx = contentBuffer.indexOf("<tool_call>");
+          contentBuffer = contentBuffer.slice(tagIdx);
+          checkedToolCall = true;
+        } else if (!isToolCall && !checkedToolCall && contentBuffer.length > 200 && !contentBuffer.includes("<tool_call>")) {
+          // Long response with no tool call tag — it's plain text
+          checkedToolCall = true;
         }
 
         if (isToolCall) {
-          toolCallBuffer += content;
+          toolCallBuffer = contentBuffer; // contentBuffer already contains the accumulated text from tag onwards
           contentBuffer = "";
-          
+
           if (done) {
-            const cleanedJson = toolCallBuffer.replace("<tool_call>", "").replace("</tool_call>", "").trim();
-            let parsedCall;
+            const match = toolCallBuffer.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
+            const rawJson = match ? match[1].trim() : toolCallBuffer.replace(/<tool_call>/g, "").replace(/<\/tool_call>/g, "").trim();
+            let parsedCall: any;
             try {
-              parsedCall = JSON.parse(cleanedJson);
-            } catch (e) {
+              parsedCall = JSON.parse(rawJson);
+            } catch {
+              // Malformed — emit as text
               const delta: OpenAIChatChunk["choices"][0]["delta"] = { content: toolCallBuffer };
               const chunk: OpenAIChatChunk = { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: null }] };
               controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
               return;
             }
 
+            // Emit the tool_calls delta
             const delta: OpenAIChatChunk["choices"][0]["delta"] = {
               tool_calls: [{
                 index: 0,
@@ -551,11 +581,14 @@ async function handleStreamingResponse(
                 type: "function",
                 function: {
                   name: parsedCall.name || "unknown",
-                  arguments: typeof parsedCall.arguments === "string" ? parsedCall.arguments : JSON.stringify(parsedCall.arguments || {})
+                  arguments: typeof parsedCall.arguments === "string"
+                    ? parsedCall.arguments
+                    : JSON.stringify(parsedCall.arguments || {})
                 }
               }]
             };
-            const chunk: OpenAIChatChunk = { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: null }] };
+            // finish_reason MUST be "tool_calls" so Hermes knows to continue the agentic loop
+            const chunk: OpenAIChatChunk = { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: "tool_calls" as any }] };
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
           }
           return;
