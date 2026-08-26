@@ -544,28 +544,54 @@ async function handleStreamingResponse(
         reasoningBuffer += reasoning;
         totalOutputLength += content.length + reasoning.length;
 
-        if (!isToolCall && contentBuffer.includes("<tool_call>")) {
-          isToolCall = true;
-          // Strip any preamble text that came before the tool call tag
-          const tagIdx = contentBuffer.indexOf("<tool_call>");
-          contentBuffer = contentBuffer.slice(tagIdx);
-          checkedToolCall = true;
-        } else if (!isToolCall && !checkedToolCall && contentBuffer.length > 200 && !contentBuffer.includes("<tool_call>")) {
-          // Long response with no tool call tag — it's plain text
-          checkedToolCall = true;
+        if (!isToolCall) {
+          if (contentBuffer.includes("<tool_call>")) {
+            isToolCall = true;
+            contentBuffer = contentBuffer.slice(contentBuffer.indexOf("<tool_call>"));
+            checkedToolCall = true;
+          } else if (contentBuffer.includes("Action:")) {
+            // Also catch the LangChain/ReAct format it learned from training data
+            isToolCall = true;
+            contentBuffer = contentBuffer.slice(contentBuffer.indexOf("Action:"));
+            checkedToolCall = true;
+          } else if (!checkedToolCall && contentBuffer.length > 200) {
+            checkedToolCall = true;
+          }
         }
 
         if (isToolCall) {
-          toolCallBuffer = contentBuffer; // contentBuffer already contains the accumulated text from tag onwards
+          toolCallBuffer = contentBuffer;
           contentBuffer = "";
 
           if (done) {
-            const match = toolCallBuffer.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
-            const rawJson = match ? match[1].trim() : toolCallBuffer.replace(/<tool_call>/g, "").replace(/<\/tool_call>/g, "").trim();
-            let parsedCall: any;
-            try {
-              parsedCall = JSON.parse(rawJson);
-            } catch {
+            let parsedCall: any = null;
+
+            // Strategy 1: XML parsing
+            if (toolCallBuffer.includes("<tool_call>")) {
+              const match = toolCallBuffer.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
+              const rawJson = match ? match[1].trim() : toolCallBuffer.replace(/<tool_call>/g, "").replace(/<\/tool_call>/g, "").trim();
+              try { parsedCall = JSON.parse(rawJson); } catch {}
+            }
+            // Strategy 2: ReAct parsing (Action: name \n Action Input: {...})
+            else if (toolCallBuffer.includes("Action:")) {
+              const actionMatch = toolCallBuffer.match(/Action:\s*([^\n]+)/);
+              const inputMatch = toolCallBuffer.match(/Action Input:\s*([\s\S]+)/);
+              if (actionMatch && inputMatch) {
+                const name = actionMatch[1].trim();
+                let args = inputMatch[1].trim();
+                // Strip markdown code block if they added it around the JSON
+                args = args.replace(/^```(?:json)?\n?/, "").replace(/```$/, "").trim();
+                parsedCall = { name, arguments: args };
+                try {
+                  // Validate the arguments are valid JSON
+                  JSON.parse(args);
+                } catch {
+                  parsedCall = null; // Invalid JSON args
+                }
+              }
+            }
+
+            if (!parsedCall || !parsedCall.name) {
               // Malformed — emit as text
               const delta: OpenAIChatChunk["choices"][0]["delta"] = { content: toolCallBuffer };
               const chunk: OpenAIChatChunk = { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: null }] };
@@ -580,7 +606,7 @@ async function handleStreamingResponse(
                 id: `call_${Date.now()}`,
                 type: "function",
                 function: {
-                  name: parsedCall.name || "unknown",
+                  name: parsedCall.name,
                   arguments: typeof parsedCall.arguments === "string"
                     ? parsedCall.arguments
                     : JSON.stringify(parsedCall.arguments || {})
