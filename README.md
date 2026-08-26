@@ -1,140 +1,71 @@
-# deepseek-oauth
+# deepseek-oauth — Free DeepSeek Proxy for Hermes & Local Agents
 
-Use DeepSeek's models through any OpenAI-compatible client. No API key needed.
+Use **DeepSeek's free web tier** as a fully OpenAI-compatible API endpoint. No API key. No credit card. Blazing-fast WebAssembly PoW solving, background daemon, and native Windows auto-startup — just like Ollama.
 
-## Setup
+## ⚡ One-line install (from GitHub)
 
-```sh
-git clone https://github.com/Devlrxxh/deepseek-oauth.git
+```bash
+git clone https://github.com/qsardor/deepseek-oauth
 cd deepseek-oauth
-npm run setup    # installs dependencies, builds, downloads Playwright Chromium
-npm run link     # makes deepseek-oauth available globally
+node install.js
 ```
 
-## Quick start
+The installer will automatically:
+- Build all packages
+- Install Playwright (for browser-based login)
+- Add `deepseek-oauth` to your global PATH via `npm link`
+- Register a **Windows Task Scheduler** task so the proxy starts silently at every login (like Ollama)
+- Boot the proxy immediately so you can start using it right away
 
-```sh
-deepseek-oauth login   # open browser to sign in
-deepseek-oauth serve   # start the proxy
+## 🔐 Sign in (required once)
+
+```bash
+deepseek-oauth login
 ```
 
-Your session is stored in `~/.deepseek-oauth/auth.json` and refreshes automatically. Or set the `DEEPSEEK_TOKEN` environment variable with your token instead.
+A browser window will open. Sign in to your DeepSeek account (or create a free one). Done.
 
-## Server flags
+## 🤝 Configure Hermes
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--host` | `127.0.0.1` | Interface to bind to |
-| `--port` | `10531` | Port to listen on |
-
-## Endpoints
-
-| Path | Method | Description |
-|------|--------|-------------|
-| `/v1/chat/completions` | POST | Chat (streaming and non-streaming) |
-| `/v1/models` | GET | Available model list |
-| `/health` | GET | Health check |
-
-## Models
-
-| Model | Capabilities |
-|-------|-------------|
-| `deepseek-chat` | Chat, streaming |
-| `deepseek-instant` | Same as `deepseek-chat` |
-| `deepseek-v3` | Same as `deepseek-chat` |
-| `deepseek-reasoner` | Chat, streaming, DeepThink reasoning |
-| `deepseek-expert` | Same as `deepseek-reasoner` |
-| `deepseek-r1` | Same as `deepseek-reasoner` |
-| `deepseek-vision` | Chat, streaming, image understanding |
-
-### DeepThink reasoning and web search
-
-Control `thinking` and `search` per request via `extra_body` (OpenAI-compatible):
-
-```ts
-const res = await openai.chat.completions.create({
-  model: "deepseek-chat",
-  messages: [{ role: "user", content: "What's new today?" }],
-  extra_body: {
-    thinking: true,   // enable DeepThink reasoning
-    search: true,      // enable web search
-  },
-});
+```bash
+hermes config set model.provider custom
+hermes config set model.base_url http://127.0.0.1:10531/v1
+hermes config set model.default deepseek-chat
 ```
 
-Reasoning models (`deepseek-reasoner`, etc.) have `thinking` enabled by default.
+Then just run `hermes chat` — the proxy is always silently running in the background.
 
-### Vision
+## 🛠 Commands
 
-Send images as `image_url` content parts. The proxy handles upload automatically:
+| Command | Description |
+|---|---|
+| `deepseek-oauth login` | Sign in to DeepSeek (opens browser) |
+| `deepseek-oauth start` | Start the proxy daemon in the background |
+| `deepseek-oauth stop` | Stop the background daemon |
+| `deepseek-oauth install` | Register auto-startup at Windows login |
+| `deepseek-oauth uninstall` | Remove the auto-startup task |
+| `deepseek-oauth serve` | Run the proxy in the foreground (for debugging) |
 
-```ts
-const res = await openai.chat.completions.create({
-  model: "deepseek-vision",
-  messages: [{
-    role: "user",
-    content: [
-      { type: "text", text: "What is in this image?" },
-      {
-        type: "image_url",
-        image_url: { url: "data:image/jpeg;base64,..." }
-      },
-    ],
-  }],
-});
+## 🔌 OpenAI API endpoint
+
+```
+http://127.0.0.1:10531/v1
 ```
 
-When images are present the proxy automatically switches to the vision model. Both `data:` URIs and `https://` URLs are supported.
+Compatible with **any** OpenAI SDK client. No API key required — pass anything as the key.
 
-## Using from code
+## 🧠 What's inside
 
-```ts
-import { createDeepSeekTransport } from "@deepseek-oauth/core";
-import { deepSeekCredentials } from "@deepseek-oauth/local";
+- **Base64 WASM solver** — Native WebAssembly Proof-of-Work, inlined into the binary. No compiler needed.
+- **Worker Threads** — PoW runs off the main thread so the event loop never freezes.
+- **Tool call translation** — Converts `<tool_call>` responses into OpenAI `tool_calls` chunks so autonomous agents actually work.
+- **Streaming usage chunks** — Emits token counts so Hermes' context bar tracks correctly.
+- **Rate-limiting Mutex** — Prevents concurrent request storms from getting your account banned.
+- **Graceful abort** — Cancels DeepSeek downloads immediately if the client disconnects.
 
-const transport = createDeepSeekTransport(deepSeekCredentials());
+## ♻️ Uninstall
 
-const res = await transport.fetch(
-  new Request("http://deepseek-oauth.local/v1/chat/completions", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: "deepseek-chat",
-      messages: [{ role: "user", content: "Hello!" }],
-    }),
-  })
-);
-
-const data = await res.json();
-console.log(data.choices[0].message.content);
+```bash
+deepseek-oauth uninstall   # remove auto-startup
+npm unlink deepseek-oauth  # remove from PATH
 ```
-
-### With the OpenAI JS SDK
-
-```ts
-import OpenAI from "openai";
-import { createDeepSeekTransport } from "@deepseek-oauth/core";
-import { deepSeekCredentials } from "@deepseek-oauth/local";
-
-const transport = createDeepSeekTransport(deepSeekCredentials());
-
-const openai = new OpenAI({
-  apiKey: "deepseek-oauth",
-  baseURL: transport.baseURL,
-  fetch: transport.fetch,
-});
-```
-
-## Packages
-
-| Package | Description |
-|---------|-------------|
-| `deepseek-oauth` | CLI: `login` and `serve` commands |
-| `@deepseek-oauth/core` | Transport, SSE parser, PoW solver, file upload, types |
-| `@deepseek-oauth/local` | Browser auth (Playwright), credential storage |
-
----
-
-Inspired by [openai-oauth](https://github.com/EvanZhouDev/openai-oauth).
-
-deepseek-oauth is unofficial and not affiliated with DeepSeek. Treat your credentials like passwords. Provided as-is.

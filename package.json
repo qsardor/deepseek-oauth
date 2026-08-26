@@ -1,8 +1,12 @@
 {
   "name": "deepseek-oauth-monorepo",
   "private": true,
+  "type": "module",
   "packageManager": "npm@10.9.8",
   "workspaces": ["packages/*"],
+  "bin": {
+    "deepseek-oauth-install": "./install.js"
+  },
   "scripts": {
     "setup": "npm install && npm run build:wasm && npm run build && npx playwright install chromium",
     "build": "turbo run build",
