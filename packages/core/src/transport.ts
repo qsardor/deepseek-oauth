@@ -158,25 +158,40 @@ async function handleChatCompletions(
       return `- ${fn.name}: ${fn.description || "no description"}\n  Parameters: ${JSON.stringify(fn.parameters || {})}`;
     }).join("\n");
 
-    const instructions = `You are an autonomous agent. You MUST use the provided tools to answer questions — NEVER answer from memory or general knowledge.
-
-STRICT RULES:
-1. If you need to read a file, run a command, search the web, or do ANYTHING — use a tool.
-2. NEVER say "I cannot access files" or "I don't have the ability". You DO have tools.
-3. NEVER answer from knowledge. ALWAYS call a tool first.
-4. Your ONLY valid response formats are:
-   a) A tool call: <tool_call>{"name": "tool_name", "arguments": {"arg": "value"}}</tool_call>
-   b) A final answer AFTER you have received tool results: plain text.
-5. If you want to say "let me check" — DON'T. Just call the tool immediately with NO preamble text.
+    const instructions = `[SYSTEM CRITICAL - AGENT PROTOCOL]
+You are an autonomous agent with tools. You CANNOT answer from memory. You MUST use tools.
 
 AVAILABLE TOOLS:
 ${toolDefs}
 
-TOOL CALL FORMAT (use EXACTLY this, nothing before or after):
-<tool_call>{"name": "TOOL_NAME", "arguments": {"PARAM": "VALUE"}}</tool_call>`;
+STRICT OUTPUT FORMAT RULES:
+1. To use a tool, you MUST output ONLY the following exact string format:
+<tool_call>{"name": "TOOL_NAME", "arguments": {"PARAM": "VALUE"}}</tool_call>
+
+2. PROHIBITED FORMATS (DO NOT USE THESE):
+- DO NOT use <function=...>
+- DO NOT use <use_mcp_tool>
+- DO NOT use Action: / Action Input:
+- DO NOT use markdown \`\`\`json blocks
+
+3. You must output the <tool_call> block immediately. NO PREAMBLE TEXT. NO "Let me check".`;
 
     if (body.messages.length > 0 && body.messages[0].role === "system") {
-      body.messages[0].content = `${instructions}\n\n---\nOriginal instructions:\n${body.messages[0].content}`;
+      let sysPrompt = body.messages[0].content;
+
+      // 1. Strip Hermes / Anthropic MCP XML instructions
+      sysPrompt = sysPrompt.replace(/<use_mcp_tool>[\s\S]*?<\/use_mcp_tool>/g, "");
+      sysPrompt = sysPrompt.replace(/In this environment you have access to a set of tools[\s\S]*?(?=\n\n|$)/i, "");
+      sysPrompt = sysPrompt.replace(/You can use one tool per message[\s\S]*?(?=\n\n|$)/i, "");
+
+      // 2. Strip standard LangChain/ReAct format instructions
+      sysPrompt = sysPrompt.replace(/Use the following format:[\s\S]*?Thought:[\s\S]*?Action:[\s\S]*?Action Input:[\s\S]*?(?=\n\n|$)/i, "");
+      
+      // 3. Strip any general "format your output as XML" or "format as JSON" that conflicts with us
+      sysPrompt = sysPrompt.replace(/Please format your output as.*?xml.*?/gi, "");
+
+      // PREPEND our strict instructions, and append the sanitized original context
+      body.messages[0].content = `${instructions}\n\n[USER SYSTEM PROMPT (SANITIZED)]\n${sysPrompt.trim()}`;
     } else {
       body.messages.unshift({ role: "system", content: instructions });
     }
@@ -550,12 +565,14 @@ async function handleStreamingResponse(
             contentBuffer = contentBuffer.slice(contentBuffer.indexOf("<tool_call>"));
             checkedToolCall = true;
           } else if (contentBuffer.includes("<use_mcp_tool>")) {
-            // Hermes MCP tool format
             isToolCall = true;
             contentBuffer = contentBuffer.slice(contentBuffer.indexOf("<use_mcp_tool>"));
             checkedToolCall = true;
+          } else if (contentBuffer.includes("<function=")) {
+            isToolCall = true;
+            contentBuffer = contentBuffer.slice(contentBuffer.indexOf("<function="));
+            checkedToolCall = true;
           } else if (contentBuffer.includes("Action:")) {
-            // Also catch the LangChain/ReAct format it learned from training data
             isToolCall = true;
             contentBuffer = contentBuffer.slice(contentBuffer.indexOf("Action:"));
             checkedToolCall = true;
@@ -611,15 +628,28 @@ async function handleStreamingResponse(
               if (actionMatch && inputMatch) {
                 const name = actionMatch[1].trim();
                 let args = inputMatch[1].trim();
-                // Strip markdown code block if they added it around the JSON
                 args = args.replace(/^```(?:json)?\n?/, "").replace(/```$/, "").trim();
                 parsedCall = { name, arguments: args };
-                try {
-                  // Validate the arguments are valid JSON
-                  JSON.parse(args);
-                } catch {
-                  parsedCall = null; // Invalid JSON args
+                try { JSON.parse(args); } catch { parsedCall = null; }
+              }
+            }
+            // Strategy 4: Hallucinated <function=NAME> ... </function>
+            else if (toolCallBuffer.includes("<function=")) {
+              const nameMatch = toolCallBuffer.match(/<function=([^>]+)>/);
+              if (nameMatch) {
+                const name = nameMatch[1].trim();
+                // Try to parse <path>...</path> style args, or just shove everything inside into JSON
+                // Example: <path>desktop/test</path> <content>hello</content>
+                const args: Record<string, string> = {};
+                const tags = toolCallBuffer.matchAll(/<([a-zA-Z0-9_]+)>([\s\S]*?)<\/\1>/g);
+                for (const match of tags) {
+                  const key = match[1];
+                  const value = match[2];
+                  if (key !== "function") {
+                    args[key] = value.trim();
+                  }
                 }
+                parsedCall = { name, arguments: JSON.stringify(args) };
               }
             }
 
