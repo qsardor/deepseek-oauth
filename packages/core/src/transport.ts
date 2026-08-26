@@ -579,6 +579,10 @@ async function handleStreamingResponse(
             isToolCall = true;
             contentBuffer = contentBuffer.slice(contentBuffer.indexOf("Action:"));
             checkedToolCall = true;
+          } else if (contentBuffer.includes("```json")) {
+            isToolCall = true;
+            contentBuffer = contentBuffer.slice(contentBuffer.indexOf("```json"));
+            checkedToolCall = true;
           } else if (!checkedToolCall && contentBuffer.length > 200) {
             checkedToolCall = true;
           }
@@ -641,8 +645,6 @@ async function handleStreamingResponse(
               const nameMatch = toolCallBuffer.match(/<function=([^>]+)>/);
               if (nameMatch) {
                 const name = nameMatch[1].trim();
-                // Try to parse <path>...</path> style args, or just shove everything inside into JSON
-                // Example: <path>desktop/test</path> <content>hello</content>
                 const args: Record<string, string> = {};
                 const tags = toolCallBuffer.matchAll(/<([a-zA-Z0-9_]+)>([\s\S]*?)<\/\1>/g);
                 for (const match of tags) {
@@ -654,6 +656,22 @@ async function handleStreamingResponse(
                 }
                 parsedCall = { name, arguments: JSON.stringify(args) };
               }
+            }
+            // Strategy 5: Raw markdown JSON block (e.g. ```json { "tool": "name", "arguments": {...} } ```)
+            else if (toolCallBuffer.includes("```json")) {
+              const match = toolCallBuffer.match(/```json\s*([\s\S]*?)```/);
+              const rawJson = match ? match[1].trim() : toolCallBuffer.replace(/```json/g, "").replace(/```/g, "").trim();
+              try { 
+                const parsed = JSON.parse(rawJson);
+                // DeepSeek sometimes uses "tool" or "name" or "action" for the function name
+                const name = parsed.tool || parsed.name || parsed.action || parsed.function;
+                if (name) {
+                  parsedCall = {
+                    name,
+                    arguments: parsed.arguments || parsed.parameters || JSON.stringify(parsed)
+                  };
+                }
+              } catch {}
             }
 
             if (!parsedCall || !parsedCall.name) {
