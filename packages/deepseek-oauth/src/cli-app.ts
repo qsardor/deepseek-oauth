@@ -11,7 +11,7 @@ const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-
 
 import { startLogin } from "./login.js";
 import { startServer } from "./server.js";
-import { startDaemon, stopDaemon } from "./daemon.js";
+import { startDaemon, stopDaemon, installStartup, uninstallStartup } from "./daemon.js";
 
 export async function main(): Promise<void> {
   const argv = await yargs(hideBin(process.argv))
@@ -67,9 +67,28 @@ export async function main(): Promise<void> {
         await startLogin(args.force);
       },
     )
+    .command(
+      "install",
+      "Register the proxy to auto-start at Windows login (like Ollama)",
+      (yargs) =>
+        yargs
+          .option("host", { type: "string", default: "127.0.0.1", describe: "Host to bind to" })
+          .option("port", { type: "number", default: 10531, describe: "Port to bind to" }),
+      (args) => {
+        installStartup(args.host, args.port);
+      },
+    )
+    .command(
+      "uninstall",
+      "Remove the auto-start task from Windows login",
+      () => {},
+      () => {
+        uninstallStartup();
+      },
+    )
     .demandCommand(
       1,
-      "Run `deepseek-oauth start` to start the proxy in the background, or `deepseek-oauth login` to sign in",
+      "Run `deepseek-oauth install` to set up auto-start, or `deepseek-oauth login` to sign in",
     )
     .parse();
 }
