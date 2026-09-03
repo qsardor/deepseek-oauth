@@ -1,0 +1,30 @@
+{
+  "name": "deepseek-oauth-monorepo",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@10.9.8",
+  "workspaces": ["packages/*"],
+  "bin": {
+    "deepseek-oauth-install": "./install.js"
+  },
+  "scripts": {
+    "setup": "npm install && npm run build:wasm && npm run build && npx playwright install chromium",
+    "build": "turbo run build",
+    "build:wasm": "node scripts/build-wasm.js",
+    "dev": "turbo run dev",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "test": "node --test packages/core/dist/*.test.js packages/deepseek-oauth/dist/*.test.js",
+    "clean": "turbo run clean",
+    "serve": "node packages/deepseek-oauth/dist/cli.js serve",
+    "login": "deepseek-oauth login",
+    "deepseek-oauth": "deepseek-oauth",
+    "link": "cd packages/deepseek-oauth && npm link"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^26.1.1",
+    "turbo": "^2.10.4",
+    "typescript": "^5.9.2"
+  }
+}
