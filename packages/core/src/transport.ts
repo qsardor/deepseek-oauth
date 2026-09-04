@@ -190,52 +190,6 @@ async function handleChatCompletions(
     // Disable DeepSeek's own web search so it doesn't answer from memory instead of using tools
     const raw2 = body as unknown as Record<string, unknown>;
     raw2.search = false;
-
-    const toolDefs = body.tools.map((t: any) => {
-      const fn = t.function || t;
-      return `- ${fn.name}: ${fn.description || "no description"}\n  Parameters: ${JSON.stringify(fn.parameters || {})}`;
-    }).join("\n");
-
-    const instructions = `[SYSTEM CRITICAL - AGENT PROTOCOL]
-You are an autonomous agent with tools. You CANNOT answer from memory. You MUST use tools.
-
-AVAILABLE TOOLS:
-${toolDefs}
-
-STRICT OUTPUT FORMAT RULES:
-1. To use a tool, you MUST output ONLY the following exact string format:
-<tool_call>{"name": "TOOL_NAME", "arguments": {"PARAM": "VALUE"}}</tool_call>
-
-2. PROHIBITED FORMATS (DO NOT USE THESE):
-- DO NOT use <function=...>
-- DO NOT use <use_mcp_tool>
-- DO NOT use Action: / Action Input:
-- DO NOT use markdown \`\`\`json blocks
-
-3. You must output the <tool_call> block immediately. NO PREAMBLE TEXT. NO "Let me check".`;
-
-    if (body.messages.length > 0 && body.messages[0].role === "system") {
-      let sysPrompt = body.messages[0].content;
-
-      if (typeof sysPrompt === "string") {
-        // 1. Strip Hermes / Anthropic MCP XML instructions
-        sysPrompt = sysPrompt.replace(/<use_mcp_tool>[\s\S]*?<\/use_mcp_tool>/g, "");
-        sysPrompt = sysPrompt.replace(/In this environment you have access to a set of tools[\s\S]*?(?=\n\n|$)/i, "");
-        sysPrompt = sysPrompt.replace(/You can use one tool per message[\s\S]*?(?=\n\n|$)/i, "");
-
-        // 2. Strip standard LangChain/ReAct format instructions
-        sysPrompt = sysPrompt.replace(/Use the following format:[\s\S]*?Thought:[\s\S]*?Action:[\s\S]*?Action Input:[\s\S]*?(?=\n\n|$)/i, "");
-        
-        // 3. Strip any general "format your output as XML" or "format as JSON" that conflicts with us
-        sysPrompt = sysPrompt.replace(/Please format your output as.*?xml.*?/gi, "");
-
-        body.messages[0].content = `${instructions}\n\n[USER SYSTEM PROMPT (SANITIZED)]\n${sysPrompt.trim()}`;
-      } else {
-        body.messages.unshift({ role: "system", content: instructions });
-      }
-    } else {
-      body.messages.unshift({ role: "system", content: instructions });
-    }
   }
 
   const raw = body as unknown as Record<string, unknown>;
