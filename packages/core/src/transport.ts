@@ -38,11 +38,24 @@ function formatMessagesForLog(messages: any[], assistantReply?: string, assistan
   return md;
 }
 
-function writeChatHistory(messages: any[], assistantReply?: string, assistantReasoning?: string) {
+function writeChatHistory(messages: any[], assistantReply?: string, assistantReasoning?: string, completionBody?: any) {
   try {
     const logsDir = path.join(process.cwd(), "logs");
     if (!fsLib.existsSync(logsDir)) fsLib.mkdirSync(logsDir, { recursive: true });
-    fsLib.writeFileSync(path.join(logsDir, "chat-history.md"), formatMessagesForLog(messages, assistantReply, assistantReasoning), "utf-8");
+    
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const filename = `chat-${timestamp}.md`;
+    
+    let md = `## Proxy Log - ${timestamp}\n`;
+    if (completionBody) {
+      md += `## Model: ${completionBody.model_type || "unknown"}\n\n`;
+      md += "### Raw JSON Sent to DeepSeek\n```json\n" + JSON.stringify(completionBody, null, 2) + "\n```\n\n";
+    }
+    
+    md += formatMessagesForLog(messages, assistantReply, assistantReasoning);
+    
+    fsLib.writeFileSync(path.join(logsDir, filename), md, "utf-8");
+    fsLib.writeFileSync(path.join(logsDir, "chat-LATEST.md"), md, "utf-8");
   } catch (e) {
     console.error("[PROXY] Failed to write chat history:", e);
   }
@@ -113,26 +126,26 @@ function cleanMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
   return deduped;
 }
 
+function extractSystem(messages: OpenAIMessage[], toolsXml?: string): string {
+  const parts: string[] = [];
+  for (const m of messages) {
+    if (m.role === "system") parts.push(extractContent(m.content));
+  }
+  if (toolsXml) parts.push(toolsXml);
+  return parts.join("\n\n");
+}
+
 function flattenMessages(messages: OpenAIMessage[], toolsXml?: string): string {
   const cleaned = cleanMessages(messages);
-  let hasSystem = false;
-  const flat = cleaned
-    .map((m) => {
-      let text = extractContent(m.content);
-      if (m.role === "system") {
-        hasSystem = true;
-        if (toolsXml) text += "\n\n" + toolsXml;
-        return `[System Instruction]:\n${text}`;
-      }
-      if (m.role === "user") return text; // DeepSeek handles user/assistant natively
-      if (m.role === "assistant") return text;
-      return text;
-    })
-    .join("\n\n");
-  if (toolsXml && !hasSystem) {
-    return `[System Instruction]:\n${toolsXml}\n\n${flat}`;
+  const turns: string[] = [];
+  for (const m of cleaned) {
+    if (m.role === "system") continue; // handled separately via extractSystem
+    const text = extractContent(m.content);
+    if (m.role === "user") turns.push(`Human: ${text}`);
+    else if (m.role === "assistant") turns.push(`Assistant: ${text}`);
+    else turns.push(text);
   }
-  return flat;
+  return turns.join("\n\n");
 }
 
 function lastUserMessage(messages: OpenAIMessage[]): string {
@@ -273,6 +286,8 @@ async function handleChatCompletions(
 
   const maxTokens = body.max_tokens;
 
+  const systemPrompt = extractSystem(textMessages, toolsXml);
+
   const completionBody = {
     chat_session_id: chatSessionId,
     parent_message_id: parentMessageId,
@@ -283,6 +298,7 @@ async function handleChatCompletions(
     action: null,
     preempt: false,
     model_type: effectiveModelType,
+    ...(systemPrompt ? { system_prompt: systemPrompt } : {}),
     ...(maxTokens != null ? { max_tokens: maxTokens } : {}),
   };
 
@@ -308,9 +324,9 @@ async function handleChatCompletions(
 
   let result: Response;
   if (isStream) {
-    result = await handleStreamingResponse(response, body.model, chatSessionId, messageIds, signal, prompt, undefined, body.messages);
+    result = await handleStreamingResponse(response, body.model, chatSessionId, messageIds, signal, prompt, undefined, body.messages, completionBody);
   } else {
-    result = await handleNonStreamingResponse(response, body.model, chatSessionId, messageIds, prompt, body.messages);
+    result = await handleNonStreamingResponse(response, body.model, chatSessionId, messageIds, prompt, body.messages, completionBody);
   }
 
   result.headers.set("x-deepseek-chat-session-id", chatSessionId);
@@ -481,6 +497,7 @@ async function handleStreamingResponse(
   prompt?: string,
   session?: any,
   messages?: any[],
+  completionBody?: any,
 ): Promise<Response> {
   if (!deepseekResponse.body) {
     throw new Error("No response body from DeepSeek");
@@ -760,7 +777,7 @@ async function handleStreamingResponse(
         }
 
         if (done) {
-          if (messages) writeChatHistory(messages, fullContentBuffer, fullReasoningBuffer);
+          if (messages) writeChatHistory(messages, fullContentBuffer, fullReasoningBuffer, completionBody);
           streamFinished = true;
           debug("stream done by parser, id:", id);
           closeStream();
@@ -797,7 +814,7 @@ async function handleStreamingResponse(
         }
       }
 
-      if (messages) writeChatHistory(messages, fullContentBuffer, fullReasoningBuffer);
+      if (messages) writeChatHistory(messages, fullContentBuffer, fullReasoningBuffer, completionBody);
       if (!streamFinished) { debug("stream fallback close, id:", id); closeStream(); }
     },
   });
@@ -818,6 +835,7 @@ async function handleNonStreamingResponse(
   messageIds?: Map<string, number>,
   prompt = "",
   messages?: any[],
+  completionBody?: any,
 ): Promise<Response> {
   if (!deepseekResponse.body) {
     throw new Error("No response body from DeepSeek");
@@ -845,7 +863,7 @@ async function handleNonStreamingResponse(
   }
   parser.flush();
 
-  if (messages) writeChatHistory(messages, fullContent, fullReasoning);
+  if (messages) writeChatHistory(messages, fullContent, fullReasoning, completionBody);
   const message: Record<string, unknown> = {
     role: "assistant",
     content: fullContent,
