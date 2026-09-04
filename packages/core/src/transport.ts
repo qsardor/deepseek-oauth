@@ -126,26 +126,25 @@ function cleanMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
   return deduped;
 }
 
-function extractSystem(messages: OpenAIMessage[], toolsXml?: string): string {
-  const parts: string[] = [];
-  for (const m of messages) {
-    if (m.role === "system") parts.push(extractContent(m.content));
-  }
-  if (toolsXml) parts.push(toolsXml);
-  return parts.join("\n\n");
-}
-
 function flattenMessages(messages: OpenAIMessage[], toolsXml?: string): string {
   const cleaned = cleanMessages(messages);
-  const turns: string[] = [];
+  const parts: string[] = [];
+  let hasSystem = false;
   for (const m of cleaned) {
-    if (m.role === "system") continue; // handled separately via extractSystem
     const text = extractContent(m.content);
-    if (m.role === "user") turns.push(`Human: ${text}`);
-    else if (m.role === "assistant") turns.push(`Assistant: ${text}`);
-    else turns.push(text);
+    if (m.role === "system") {
+      hasSystem = true;
+      parts.push(`[System Instruction]:\n${text}${toolsXml ? "\n\n" + toolsXml : ""}`);
+    } else if (m.role === "user") {
+      parts.push(`Human: ${text}`);
+    } else if (m.role === "assistant") {
+      parts.push(`Assistant: ${text}`);
+    } else {
+      parts.push(text);
+    }
   }
-  return turns.join("\n\n");
+  if (toolsXml && !hasSystem) parts.unshift(`[System Instruction]:\n${toolsXml}`);
+  return parts.join("\n\n");
 }
 
 function lastUserMessage(messages: OpenAIMessage[]): string {
@@ -286,8 +285,6 @@ async function handleChatCompletions(
 
   const maxTokens = body.max_tokens;
 
-  const systemPrompt = extractSystem(textMessages, toolsXml);
-
   const completionBody = {
     chat_session_id: chatSessionId,
     parent_message_id: parentMessageId,
@@ -298,7 +295,6 @@ async function handleChatCompletions(
     action: null,
     preempt: false,
     model_type: effectiveModelType,
-    ...(systemPrompt ? { system_prompt: systemPrompt } : {}),
     ...(maxTokens != null ? { max_tokens: maxTokens } : {}),
   };
 
@@ -642,41 +638,29 @@ async function handleStreamingResponse(
                 try { JSON.parse(args); } catch { parsedCall = null; }
               }
             }
-            // Strategy 1: XML parsing (<tool_call>)
-            else if (toolCallBuffer.includes("<tool_call>")) {
+            // Strategy 1: XML parsing (<tool_call>JSON</tool_call>)
+            if (!parsedCall && toolCallBuffer.includes("<tool_call>")) {
               const match = toolCallBuffer.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
               const rawJson = match ? match[1].trim() : toolCallBuffer.replace(/<tool_call>/g, "").replace(/<\/tool_call>/g, "").trim();
               try { parsedCall = JSON.parse(rawJson); } catch {}
             }
             // Strategy 2: Hermes MCP XML (<use_mcp_tool>)
-            else if (toolCallBuffer.includes("<use_mcp_tool>")) {
+            if (!parsedCall && toolCallBuffer.includes("<use_mcp_tool>")) {
               const serverMatch = toolCallBuffer.match(/<server_name>(.*?)<\/server_name>/);
               const toolMatch = toolCallBuffer.match(/<tool_name>(.*?)<\/tool_name>/);
               const argsMatch = toolCallBuffer.match(/<arguments>([\s\S]*?)<\/arguments>/);
-              
               if (toolMatch && argsMatch) {
-                // Combine server_name and tool_name if necessary, or just use tool_name 
-                // For OpenAI format, we usually just pass the tool_name. If Hermes prefixes it, we need to handle that.
-                // Looking at typical MCP implementations via OpenAI, the function name is usually `<server>__<tool>`.
-                // Let's check how Hermes maps it. Usually it expects the raw JSON function call.
-                // Wait! If Hermes explicitly asked for <use_mcp_tool>, maybe we should just return it as text and Hermes will parse it natively?
-                // YES! If Hermes parses <use_mcp_tool> itself from the text response, we DON'T need to translate it into an OpenAI tool_call!
-                // Wait... if Hermes parsed it from text natively, why didn't it execute the tool in my previous log?
-                // Let's review the previous log: Hermes printed it out as a text response and ended the session!
-                // Ah, Hermes natively parses OpenAI `tool_calls` array for executing tools. The <use_mcp_tool> format is just what DeepSeek chose to output because it saw it in the system prompt. But Hermes EXPECTS an OpenAI tool_calls chunk.
-                // Let's translate it!
                 let name = toolMatch[1].trim();
                 if (serverMatch) name = `mcp__${serverMatch[1].trim()}__${name}`;
-                
                 try {
                   const args = argsMatch[1].trim();
-                  JSON.parse(args); // validate
+                  JSON.parse(args);
                   parsedCall = { name, arguments: args };
                 } catch {}
               }
             }
             // Strategy 3: ReAct parsing (Action: name \n Action Input: {...})
-            else if (toolCallBuffer.includes("Action:")) {
+            if (!parsedCall && toolCallBuffer.includes("Action:")) {
               const actionMatch = toolCallBuffer.match(/Action:\s*([^\n]+)/);
               const inputMatch = toolCallBuffer.match(/Action Input:\s*([\s\S]+)/);
               if (actionMatch && inputMatch) {
@@ -688,36 +672,26 @@ async function handleStreamingResponse(
               }
             }
             // Strategy 4: Hallucinated <function=NAME> ... </function>
-            else if (toolCallBuffer.includes("<function=")) {
+            if (!parsedCall && toolCallBuffer.includes("<function=")) {
               const nameMatch = toolCallBuffer.match(/<function=([^>]+)>/);
               if (nameMatch) {
                 const name = nameMatch[1].trim();
                 const args: Record<string, string> = {};
                 const tags = toolCallBuffer.matchAll(/<([a-zA-Z0-9_]+)>([\s\S]*?)<\/\1>/g);
                 for (const match of tags) {
-                  const key = match[1];
-                  const value = match[2];
-                  if (key !== "function") {
-                    args[key] = value.trim();
-                  }
+                  if (match[1] !== "function") args[match[1]] = match[2].trim();
                 }
                 parsedCall = { name, arguments: JSON.stringify(args) };
               }
             }
-            // Strategy 5: Raw markdown JSON block (e.g. ```json { "tool": "name", "arguments": {...} } ```)
-            else if (toolCallBuffer.includes("```json")) {
+            // Strategy 5: Raw markdown JSON block (```json {...} ```)
+            if (!parsedCall && toolCallBuffer.includes("```json")) {
               const match = toolCallBuffer.match(/```json\s*([\s\S]*?)```/);
               const rawJson = match ? match[1].trim() : toolCallBuffer.replace(/```json/g, "").replace(/```/g, "").trim();
-              try { 
+              try {
                 const parsed = JSON.parse(rawJson);
-                // DeepSeek sometimes uses "tool" or "name" or "action" for the function name
                 const name = parsed.tool || parsed.name || parsed.action || parsed.function;
-                if (name) {
-                  parsedCall = {
-                    name,
-                    arguments: parsed.arguments || parsed.parameters || JSON.stringify(parsed)
-                  };
-                }
+                if (name) parsedCall = { name, arguments: parsed.arguments || parsed.parameters || JSON.stringify(parsed) };
               } catch {}
             }
 
