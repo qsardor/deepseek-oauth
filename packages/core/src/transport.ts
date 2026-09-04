@@ -158,6 +158,7 @@ function lastUserMessage(messages: OpenAIMessage[]): string {
 
 export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
   const messageIds = new Map<string, number>();
+  let persistedSessionId: string | null = null; // reuse same web chat session across turns
 
   return {
     baseURL: "https://deepseek-oauth.local/v1",
@@ -172,11 +173,13 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
 
       if (path === "/v1/chat/completions" || path === "/chat/completions") {
         const body = JSON.parse(await request.text()) as OpenAIChatRequest;
-        const raw = body as unknown as Record<string, unknown>;
-        raw.tools = undefined;
-        raw.tool_choice = undefined;
-        const existingSessionId = request.headers.get("x-deepseek-chat-session-id");
-        return handleChatCompletions(body, credentials, existingSessionId, messageIds, request.signal);
+        // Use persisted session ID for multi-turn continuity (Vercel AI SDK doesn't echo response headers)
+        const existingSessionId = persistedSessionId ?? request.headers.get("x-deepseek-chat-session-id");
+        const result = await handleChatCompletions(body, credentials, existingSessionId, messageIds, request.signal);
+        // Persist the new session ID for subsequent turns
+        const newSessionId = result.headers.get("x-deepseek-chat-session-id");
+        if (newSessionId) persistedSessionId = newSessionId;
+        return result;
       }
 
       return new Response("Not Found", { status: 404 });
