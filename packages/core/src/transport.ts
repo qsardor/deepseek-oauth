@@ -83,13 +83,14 @@ function cleanMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
   const cleaned: OpenAIMessage[] = [];
   for (const m of messages) {
     if (m.role === "tool") {
-      cleaned.push({ role: "user", content: `[Tool Result]:\n${extractContent(m.content)}` });
+      const name = (m as any).name || m.tool_call_id || "tool";
+      cleaned.push({ role: "user", content: `|DSML|\n<tool_result name="${name}">\n<output>\n${extractContent(m.content)}\n</output>\n</tool_result>` });
       continue;
     }
     if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
-      const callsText = m.tool_calls.map((c: any) => `[Tool Call]: ${c.function.name}(${c.function.arguments})`).join("\n");
+      const callsText = m.tool_calls.map((c: any) => `|DSML|\n<tool_call name="${c.function.name}">\n<arguments>\n${c.function.arguments}\n</arguments>\n</tool_call>`).join("\n\n");
       const text = extractContent(m.content);
-      const combined = text ? `${text}\n${callsText}` : callsText;
+      const combined = text ? `${text}\n\n${callsText}` : callsText;
       cleaned.push({ role: "assistant", content: combined });
       continue;
     }
@@ -112,17 +113,26 @@ function cleanMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
   return deduped;
 }
 
-function flattenMessages(messages: OpenAIMessage[]): string {
+function flattenMessages(messages: OpenAIMessage[], toolsXml?: string): string {
   const cleaned = cleanMessages(messages);
-  return cleaned
+  let hasSystem = false;
+  const flat = cleaned
     .map((m) => {
-      const text = extractContent(m.content);
-      if (m.role === "system") return `[System Instruction]:\n${text}`;
+      let text = extractContent(m.content);
+      if (m.role === "system") {
+        hasSystem = true;
+        if (toolsXml) text += "\n\n" + toolsXml;
+        return `[System Instruction]:\n${text}`;
+      }
       if (m.role === "user") return text; // DeepSeek handles user/assistant natively
       if (m.role === "assistant") return text;
       return text;
     })
     .join("\n\n");
+  if (toolsXml && !hasSystem) {
+    return `[System Instruction]:\n${toolsXml}\n\n${flat}`;
+  }
+  return flat;
 }
 
 function lastUserMessage(messages: OpenAIMessage[]): string {
@@ -186,10 +196,21 @@ async function handleChatCompletions(
   const session = await credentials.getSession();
   const config = resolveModel(body.model);
 
+  let toolsXml = "";
   if (body.tools && body.tools.length > 0) {
     // Disable DeepSeek's own web search so it doesn't answer from memory instead of using tools
     const raw2 = body as unknown as Record<string, unknown>;
     raw2.search = false;
+    
+    toolsXml = "|DSML|\n<tools>\n";
+    for (const t of body.tools) {
+      if (t.type === "function") {
+        toolsXml += `<tool name="${t.function.name}">\n`;
+        if (t.function.description) toolsXml += `<description>${t.function.description}</description>\n`;
+        toolsXml += `<parameters>\n${JSON.stringify(t.function.parameters)}\n</parameters>\n</tool>\n`;
+      }
+    }
+    toolsXml += "</tools>";
   }
 
   const raw = body as unknown as Record<string, unknown>;
@@ -228,7 +249,7 @@ async function handleChatCompletions(
   if (isReuse) {
     prompt = `User: ${lastUserMessage(textMessages)}`;
   } else {
-    prompt = flattenMessages(textMessages);
+    prompt = flattenMessages(textMessages, toolsXml);
   }
 
   if (hasImages && !prompt.trim()) {
@@ -555,7 +576,11 @@ async function handleStreamingResponse(
         totalOutputLength += content.length + reasoning.length;
 
         if (!isToolCall) {
-          if (contentBuffer.includes("<tool_call>")) {
+          if (contentBuffer.includes("|DSML|")) {
+            isToolCall = true;
+            contentBuffer = contentBuffer.slice(contentBuffer.indexOf("|DSML|"));
+            checkedToolCall = true;
+          } else if (contentBuffer.includes("<tool_call>")) {
             isToolCall = true;
             contentBuffer = contentBuffer.slice(contentBuffer.indexOf("<tool_call>"));
             checkedToolCall = true;
@@ -587,8 +612,21 @@ async function handleStreamingResponse(
           if (done) {
             let parsedCall: any = null;
 
+            // Strategy 0: DSML XML parsing
+            if (toolCallBuffer.includes("|DSML|")) {
+              const nameMatch = toolCallBuffer.match(/<tool_call[^>]*name=["']([^"']+)["'][^>]*>/) || toolCallBuffer.match(/<name>([^<]+)<\/name>/) || toolCallBuffer.match(/name=["']([^"']+)["']/);
+              const argsMatch = toolCallBuffer.match(/<arguments>([\s\S]*?)<\/arguments>/) || toolCallBuffer.match(/<parameters>([\s\S]*?)<\/parameters>/) || toolCallBuffer.match(/>([\s\S]*?)<\/tool_call>/) || toolCallBuffer.match(/\{[\s\S]*\}/);
+              if (nameMatch) {
+                const name = nameMatch[1].trim();
+                let args = argsMatch ? argsMatch[1].trim() : "{}";
+                const jsonMatch = args.match(/\{[\s\S]*\}/);
+                if (jsonMatch) args = jsonMatch[0];
+                parsedCall = { name, arguments: args };
+                try { JSON.parse(args); } catch { parsedCall = null; }
+              }
+            }
             // Strategy 1: XML parsing (<tool_call>)
-            if (toolCallBuffer.includes("<tool_call>")) {
+            else if (toolCallBuffer.includes("<tool_call>")) {
               const match = toolCallBuffer.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
               const rawJson = match ? match[1].trim() : toolCallBuffer.replace(/<tool_call>/g, "").replace(/<\/tool_call>/g, "").trim();
               try { parsedCall = JSON.parse(rawJson); } catch {}
