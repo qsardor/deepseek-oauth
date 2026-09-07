@@ -739,17 +739,11 @@ async function handleStreamingResponse(
               }
             }
             // Strategy 1: XML parsing (<tool_call>JSON</tool_call>) or <｜｜DSML｜｜tool_call>
-            if (!parsedCall && (toolCallBuffer.includes("<tool_call>") || toolCallBuffer.includes("<｜｜DSML｜｜tool_call>"))) {
+            if (!parsedCall && (toolCallBuffer.includes("<tool_call>") || toolCallBuffer.includes("DSML"))) {
               let rawJson = toolCallBuffer;
-              const match1 = toolCallBuffer.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
-              const match2 = toolCallBuffer.match(/<｜｜DSML｜｜tool_call>([\s\S]*?)<\/｜｜DSML｜｜tool_call>/);
-              if (match1) {
-                rawJson = match1[1].trim();
-              } else if (match2) {
-                rawJson = match2[1].trim();
-              } else {
-                rawJson = toolCallBuffer.replace(/<tool_call>/g, "").replace(/<\/tool_call>/g, "")
-                                        .replace(/<｜｜DSML｜｜tool_call>/g, "").replace(/<\/｜｜DSML｜｜tool_call>/g, "").trim();
+              const extractJsonMatch = rawJson.match(/\{[\s\S]*\}/);
+              if (extractJsonMatch) {
+                rawJson = extractJsonMatch[0];
               }
               try { parsedCall = JSON.parse(rawJson); console.log("Parsed Strategy 1:", parsedCall); } catch (e) { console.error("Strategy 1 parse error", e, rawJson); }
             }
