@@ -16,6 +16,7 @@
     "format": "biome format --write .",
     "test": "node --test packages/core/dist/*.test.js packages/deepseek-oauth/dist/*.test.js",
     "clean": "turbo run clean",
+    "start": "npm run serve",
     "serve": "node packages/deepseek-oauth/dist/cli.js serve",
     "login": "deepseek-oauth login",
     "deepseek-oauth": "deepseek-oauth",

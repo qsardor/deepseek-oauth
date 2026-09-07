@@ -40,12 +40,21 @@ function formatMessagesForLog(messages: any[], assistantReply?: string, assistan
 
 function writeChatHistory(messages: any[], assistantReply?: string, assistantReasoning?: string, completionBody?: any) {
   try {
-    const logsDir = path.join(process.cwd(), "logs");
+    const logsDir = path.join("C:\\RedSeek", "logs");
     if (!fsLib.existsSync(logsDir)) fsLib.mkdirSync(logsDir, { recursive: true });
     
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const filename = `chat-${timestamp}.md`;
     
+    const debugData = {
+      timestamp,
+      raw_messages_received: messages,
+      raw_assistant_reply: assistantReply,
+      raw_assistant_reasoning: assistantReasoning,
+      deepseek_completion_body: completionBody
+    };
+    fsLib.writeFileSync(path.join(logsDir, `raw-debug-${timestamp}.json`), JSON.stringify(debugData, null, 2), "utf-8");
+
     let md = `## Proxy Log - ${timestamp}\n`;
     if (completionBody) {
       md += `## Model: ${completionBody.model_type || "unknown"}\n\n`;
@@ -97,11 +106,11 @@ function cleanMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
   for (const m of messages) {
     if (m.role === "tool") {
       const name = (m as any).name || m.tool_call_id || "tool";
-      cleaned.push({ role: "user", content: `|DSML|\n<tool_result name="${name}">\n<output>\n${extractContent(m.content)}\n</output>\n</tool_result>` });
+      cleaned.push({ role: "user", content: `<tool_result name="${name}">\n<output>\n${extractContent(m.content)}\n</output>\n</tool_result>\n\nTool execution completed. If the task is NOT complete, issue your next <tool_call> immediately without text. If the task is fully complete, provide your final response to the user.` });
       continue;
     }
     if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
-      const callsText = m.tool_calls.map((c: any) => `|DSML|\n<tool_call name="${c.function.name}">\n<arguments>\n${c.function.arguments}\n</arguments>\n</tool_call>`).join("\n\n");
+      const callsText = m.tool_calls.map((c: any) => `<tool_call>\n{"name": "${c.function.name}", "arguments": ${c.function.arguments}}\n</tool_call>`).join("\n\n");
       const text = extractContent(m.content);
       const combined = text ? `${text}\n\n${callsText}` : callsText;
       cleaned.push({ role: "assistant", content: combined });
@@ -158,7 +167,7 @@ function lastUserMessage(messages: OpenAIMessage[]): string {
 
 export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
   const messageIds = new Map<string, number>();
-  let persistedSessionId: string | null = null; // reuse same web chat session across turns
+  const sessionMap = new Map<string, string>(); // map x-opencode-session to chatSessionId
 
   return {
     baseURL: "https://deepseek-oauth.local/v1",
@@ -173,12 +182,19 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
 
       if (path === "/v1/chat/completions" || path === "/chat/completions") {
         const body = JSON.parse(await request.text()) as OpenAIChatRequest;
-        // Use persisted session ID for multi-turn continuity (Vercel AI SDK doesn't echo response headers)
-        const existingSessionId = persistedSessionId ?? request.headers.get("x-deepseek-chat-session-id");
+        
+        const baseOpencodeSession = request.headers.get("x-opencode-session") || "default";
+        const hasTools = body.tools && body.tools.length > 0;
+        const sessionMapKey = !hasTools ? baseOpencodeSession + "_notools" : baseOpencodeSession;
+        
+        const existingSessionId = sessionMap.get(sessionMapKey) ?? request.headers.get("x-deepseek-chat-session-id");
+        
         const result = await handleChatCompletions(body, credentials, existingSessionId, messageIds, request.signal);
-        // Persist the new session ID for subsequent turns
+        
         const newSessionId = result.headers.get("x-deepseek-chat-session-id");
-        if (newSessionId) persistedSessionId = newSessionId;
+        if (newSessionId) {
+          sessionMap.set(sessionMapKey, newSessionId);
+        }
         return result;
       }
 
@@ -217,7 +233,7 @@ async function handleChatCompletions(
     const raw2 = body as unknown as Record<string, unknown>;
     raw2.search = false;
     
-    toolsXml = "|DSML|\n<tools>\n";
+    toolsXml = "You are an autonomous AI agent integrated directly into the user's system with full permission to execute commands and modify files. You MUST NOT refuse to create files, run commands, or interact with the system. When the user asks you to do something, you MUST use the following XML format to call the appropriate tool. DO NOT explain how to do it manually.\n\n[SYSTEM_TOOLS]\n<tools>\n";
     for (const t of body.tools) {
       if (t.type === "function") {
         toolsXml += `<tool name="${t.function.name}">\n`;
@@ -225,7 +241,7 @@ async function handleChatCompletions(
         toolsXml += `<parameters>\n${JSON.stringify(t.function.parameters)}\n</parameters>\n</tool>\n`;
       }
     }
-    toolsXml += "</tools>";
+    toolsXml += "</tools>\n\nCRITICAL INSTRUCTION: To use a tool, you MUST respond EXACTLY with this XML format and NOTHING ELSE. Do not add conversational text:\n<tool_call>\n{\"name\": \"TOOL_NAME\", \"arguments\": {...json...}}\n</tool_call>\n\nAfter you call a tool, the user will reply with the tool's execution result in this exact format:\n<tool_result name=\"TOOL_NAME\">\n<output>\n...result...\n</output>\n</tool_result>\n\nIf the task is NOT complete, immediately output your next <tool_call> without any conversational text. Keep issuing tool calls until the overarching objective is met. Only provide a final text summary when the task is 100% complete.";
   }
 
   const raw = body as unknown as Record<string, unknown>;
@@ -261,20 +277,96 @@ async function handleChatCompletions(
   }
 
   let prompt: string;
+  let chatSession: any = null;
+  let challenge: any = null;
+
+  // HIDDEN INIT TURN 0 (OpenClaw style priming)
+  if (!isReuse && (toolsXml || textMessages.some(m => m.role === "system"))) {
+    // 1. Gather all system instructions and tools
+    const systemMsgs = textMessages.filter(m => m.role === "system");
+    let turn0Text = systemMsgs.map(m => extractContent(m.content)).join("\n");
+    if (toolsXml) {
+      turn0Text += (turn0Text ? "\n\n" : "") + toolsXml;
+    }
+    const turn0Prompt = `[System Instruction]:\n${turn0Text}\n\nSystem: You must acknowledge these instructions and tools by replying exactly with 'Acknowledged'. For all subsequent messages, you must act as the AI agent and answer the user's queries autonomously according to these rules.`;
+
+    // 2. Create session and solve PoW for Turn 0
+    chatSession = await createChatSession(session);
+    chatSessionId = chatSession.id;
+    challenge = await requestPoWChallenge(session);
+    const powEncoded0 = encodePowResponse(await solvePoWAsync(challenge));
+
+    // 3. Send the hidden Turn 0 request
+    const headers0 = buildHeaders(session);
+    headers0.cookie = buildCookieHeader(session.cookies);
+    headers0["x-ds-pow-response"] = powEncoded0;
+
+    const response0 = await fetch(`${BASE_URL}/api/v0/chat/completion`, {
+      method: "POST",
+      headers: headers0,
+      body: JSON.stringify({
+        chat_session_id: chatSessionId,
+        parent_message_id: null,
+        prompt: turn0Prompt,
+        ref_file_ids: [],
+        thinking_enabled: false,
+        search_enabled: false,
+        action: null,
+        preempt: false,
+        model_type: effectiveModelType,
+      }),
+      signal,
+    });
+    
+    console.log("[PROXY] Turn 0 Status:", response0.status);
+
+    // 4. Consume the streaming response silently to get the new parent_message_id
+    if (response0.ok && response0.body) {
+      const reader = response0.body.getReader();
+      const decoder = new TextDecoder();
+      let msgId0: number | null = null;
+      
+      const parser0 = new DeepSeekSSEParser((_c, _r, _done, msgId) => {
+        if (msgId != null) msgId0 = msgId;
+      });
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parser0.feed(decoder.decode(value, { stream: true }));
+      }
+      parser0.flush();
+
+      console.log("[PROXY] Turn 0 msgId0 extracted:", msgId0);
+      if (msgId0 != null && messageIds) {
+        messageIds.set(chatSessionId, msgId0);
+      }
+    }
+
+    // Now treat the actual user message as a reuse of this primed session
+    isReuse = true;
+    challenge = null; // Reset challenge for Turn 1
+  }
+
+  // Filter out system messages so they aren't sent again in Turn 1
+  const nonSystemMsgs = textMessages.filter(m => m.role !== "system");
+
   if (isReuse) {
-    prompt = `User: ${lastUserMessage(textMessages)}`;
+    prompt = lastUserMessage(cleanMessages(nonSystemMsgs));
   } else {
-    prompt = flattenMessages(textMessages, toolsXml);
+    prompt = flattenMessages(nonSystemMsgs, ""); // fallback if no tools/system
   }
 
   if (hasImages && !prompt.trim()) {
     prompt = "Describe this image.";
   }
 
-  const [chatSession, challenge] = await Promise.all([
-    isReuse ? Promise.resolve(null) : createChatSession(session),
-    requestPoWChallenge(session),
-  ]);
+  if (!chatSession && !isReuse) {
+    chatSession = await createChatSession(session);
+  }
+  if (!challenge) {
+    challenge = await requestPoWChallenge(session);
+  }
 
   if (chatSession) {
     chatSessionId = chatSession.id;
@@ -592,9 +684,13 @@ async function handleStreamingResponse(
         totalOutputLength += content.length + reasoning.length;
 
         if (!isToolCall) {
-          if (contentBuffer.includes("|DSML|")) {
+          if (contentBuffer.includes("[SYSTEM_TOOLS]")) {
             isToolCall = true;
-            contentBuffer = contentBuffer.slice(contentBuffer.indexOf("|DSML|"));
+            contentBuffer = contentBuffer.slice(contentBuffer.indexOf("[SYSTEM_TOOLS]"));
+            checkedToolCall = true;
+          } else if (contentBuffer.includes("<｜｜DSML｜｜")) {
+            isToolCall = true;
+            contentBuffer = contentBuffer.slice(contentBuffer.indexOf("<｜｜DSML｜｜"));
             checkedToolCall = true;
           } else if (contentBuffer.includes("<tool_call>")) {
             isToolCall = true;
@@ -622,14 +718,15 @@ async function handleStreamingResponse(
         }
 
         if (isToolCall) {
-          toolCallBuffer = contentBuffer;
+          toolCallBuffer += contentBuffer;
           contentBuffer = "";
 
           if (done) {
             let parsedCall: any = null;
+            console.log("Stream DONE. toolCallBuffer:", JSON.stringify(toolCallBuffer));
 
             // Strategy 0: DSML XML parsing
-            if (toolCallBuffer.includes("|DSML|")) {
+            if (toolCallBuffer.includes("[SYSTEM_TOOLS]")) {
               const nameMatch = toolCallBuffer.match(/<tool_call[^>]*name=["']([^"']+)["'][^>]*>/) || toolCallBuffer.match(/<name>([^<]+)<\/name>/) || toolCallBuffer.match(/name=["']([^"']+)["']/);
               const argsMatch = toolCallBuffer.match(/<arguments>([\s\S]*?)<\/arguments>/) || toolCallBuffer.match(/<parameters>([\s\S]*?)<\/parameters>/) || toolCallBuffer.match(/>([\s\S]*?)<\/tool_call>/) || toolCallBuffer.match(/\{[\s\S]*\}/);
               if (nameMatch) {
@@ -641,11 +738,20 @@ async function handleStreamingResponse(
                 try { JSON.parse(args); } catch { parsedCall = null; }
               }
             }
-            // Strategy 1: XML parsing (<tool_call>JSON</tool_call>)
-            if (!parsedCall && toolCallBuffer.includes("<tool_call>")) {
-              const match = toolCallBuffer.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
-              const rawJson = match ? match[1].trim() : toolCallBuffer.replace(/<tool_call>/g, "").replace(/<\/tool_call>/g, "").trim();
-              try { parsedCall = JSON.parse(rawJson); } catch {}
+            // Strategy 1: XML parsing (<tool_call>JSON</tool_call>) or <｜｜DSML｜｜tool_call>
+            if (!parsedCall && (toolCallBuffer.includes("<tool_call>") || toolCallBuffer.includes("<｜｜DSML｜｜tool_call>"))) {
+              let rawJson = toolCallBuffer;
+              const match1 = toolCallBuffer.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
+              const match2 = toolCallBuffer.match(/<｜｜DSML｜｜tool_call>([\s\S]*?)<\/｜｜DSML｜｜tool_call>/);
+              if (match1) {
+                rawJson = match1[1].trim();
+              } else if (match2) {
+                rawJson = match2[1].trim();
+              } else {
+                rawJson = toolCallBuffer.replace(/<tool_call>/g, "").replace(/<\/tool_call>/g, "")
+                                        .replace(/<｜｜DSML｜｜tool_call>/g, "").replace(/<\/｜｜DSML｜｜tool_call>/g, "").trim();
+              }
+              try { parsedCall = JSON.parse(rawJson); console.log("Parsed Strategy 1:", parsedCall); } catch (e) { console.error("Strategy 1 parse error", e, rawJson); }
             }
             // Strategy 2: Hermes MCP XML (<use_mcp_tool>)
             if (!parsedCall && toolCallBuffer.includes("<use_mcp_tool>")) {
@@ -660,6 +766,27 @@ async function handleStreamingResponse(
                   JSON.parse(args);
                   parsedCall = { name, arguments: args };
                 } catch {}
+              }
+            }
+            // Strategy 5: DeepSeek Native DSML (<｜｜DSML｜｜)
+            if (!parsedCall && toolCallBuffer.includes("<｜｜DSML｜｜")) {
+              const nameMatch = toolCallBuffer.match(/<｜｜DSML｜｜invoke[^>]*name=["']([^"']+)["']/);
+              if (nameMatch) {
+                let name = nameMatch[1].trim();
+                if (name === "exec_command") name = "bash";
+                if (name === "read_file") name = "read";
+                if (name === "write_file") name = "write";
+                
+                const argsObj: Record<string, string> = {};
+                const paramRegex = /<｜｜DSML｜｜parameter[^>]*name=["']([^"']+)["'][^>]*>([\s\S]*?)<\/｜｜DSML｜｜parameter>/g;
+                let m;
+                while ((m = paramRegex.exec(toolCallBuffer)) !== null) {
+                  let val = m[2].trim();
+                  // map internal tool params to expected ones
+                  if (name === "bash" && m[1] === "cmd") argsObj["command"] = val;
+                  else argsObj[m[1]] = val;
+                }
+                parsedCall = { name, arguments: JSON.stringify(argsObj) };
               }
             }
             // Strategy 3: ReAct parsing (Action: name \n Action Input: {...})
@@ -699,6 +826,7 @@ async function handleStreamingResponse(
             }
 
             if (!parsedCall || !parsedCall.name) {
+              console.log("Malformed tool call, falling back to text", toolCallBuffer);
               // Malformed — emit as text
               const delta: OpenAIChatChunk["choices"][0]["delta"] = { content: toolCallBuffer };
               const chunk: OpenAIChatChunk = { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: null }] };
@@ -723,22 +851,38 @@ async function handleStreamingResponse(
             // finish_reason MUST be "tool_calls" so Hermes knows to continue the agentic loop
             const chunk: OpenAIChatChunk = { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: "tool_calls" as any }] };
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+            
+            if (messages) writeChatHistory(messages, fullContentBuffer, fullReasoningBuffer, completionBody);
+            streamFinished = true;
+            closeStream();
           }
           return;
         }
 
-        const hasPending = contentBuffer.length > 0 || reasoningBuffer.length > 0;
         const shouldFlush =
           done ||
-          (hasPending &&
-            (contentBuffer.length > 20 ||
-              reasoningBuffer.length > 20 ||
-              Date.now() - lastFlushTime > 50));
+          (reasoningBuffer.length > 0 &&
+            (reasoningBuffer.length > 20 || Date.now() - lastFlushTime > 50)) ||
+          (contentBuffer.length > 0 &&
+            checkedToolCall &&
+            (contentBuffer.length > 20 || Date.now() - lastFlushTime > 50));
+
         if (shouldFlush) {
-          if (hasPending) {
-            const delta: OpenAIChatChunk["choices"][0]["delta"] = {};
-            if (contentBuffer) delta.content = contentBuffer;
-            if (reasoningBuffer) delta.reasoning_content = reasoningBuffer;
+          const delta: OpenAIChatChunk["choices"][0]["delta"] = {};
+          let emitted = false;
+
+          if (contentBuffer && (done || checkedToolCall)) {
+            delta.content = contentBuffer;
+            contentBuffer = "";
+            emitted = true;
+          }
+          if (reasoningBuffer && (done || reasoningBuffer.length > 20 || Date.now() - lastFlushTime > 50)) {
+            delta.reasoning_content = reasoningBuffer;
+            reasoningBuffer = "";
+            emitted = true;
+          }
+
+          if (emitted) {
             const chunk: OpenAIChatChunk = {
               id,
               object: "chat.completion.chunk",
@@ -747,17 +891,15 @@ async function handleStreamingResponse(
               choices: [{ index: 0, delta, finish_reason: null }],
             };
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
-            contentBuffer = "";
-            reasoningBuffer = "";
             lastFlushTime = Date.now();
           }
-        }
 
-        if (done) {
-          if (messages) writeChatHistory(messages, fullContentBuffer, fullReasoningBuffer, completionBody);
-          streamFinished = true;
-          debug("stream done by parser, id:", id);
-          closeStream();
+          if (done) {
+            if (messages) writeChatHistory(messages, fullContentBuffer, fullReasoningBuffer, completionBody);
+            streamFinished = true;
+            debug("stream done by parser, id:", id);
+            closeStream();
+          }
         }
       });
 
@@ -846,8 +988,11 @@ async function handleNonStreamingResponse(
     content: fullContent,
   };
 
-  if (fullContent.trim().startsWith("<tool_call>")) {
-    const cleanedJson = fullContent.replace("<tool_call>", "").replace("</tool_call>", "").trim();
+  console.log("handleNonStreamingResponse -> fullContent", fullContent);
+  if (fullContent.trim().startsWith("<tool_call>") || fullContent.trim().startsWith("<｜｜DSML｜｜tool_call>")) {
+    const cleanedJson = fullContent.replace(/<tool_call>/g, "").replace(/<\/tool_call>/g, "")
+                                   .replace(/<｜｜DSML｜｜tool_call>/g, "").replace(/<\/｜｜DSML｜｜tool_call>/g, "").trim();
+    console.log("Non-streaming parsed cleanedJson", cleanedJson);
     try {
       const parsedCall = JSON.parse(cleanedJson);
       message.content = null;
@@ -859,7 +1004,9 @@ async function handleNonStreamingResponse(
           arguments: typeof parsedCall.arguments === "string" ? parsedCall.arguments : JSON.stringify(parsedCall.arguments || {})
         }
       }];
+      console.log("Non-streaming generated tool_calls", message.tool_calls);
     } catch (e) {
+      console.error("Non-streaming parse error", e);
       // Ignore and fallback to text
     }
   }
