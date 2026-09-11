@@ -43,13 +43,22 @@ function writeChatHistory(messages: any[], assistantReply?: string, assistantRea
     const logsDir = path.join("C:\\RedSeek", "logs");
     if (!fsLib.existsSync(logsDir)) fsLib.mkdirSync(logsDir, { recursive: true });
     
+    // Clean up "leak" from the debug logs
+    let cleanReply = assistantReply;
+    if (cleanReply) {
+      cleanReply = cleanReply.replace(/<｜｜DSML｜｜tool_call>[\s\S]*?(?:<\/｜｜DSML｜｜tool_call>|$)/g, "");
+      cleanReply = cleanReply.replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/g, "");
+      cleanReply = cleanReply.replace(/<ï½œï½œDSMLï½œï½œtool_call>[\s\S]*?(?:<\/ï½œï½œDSMLï½œï½œtool_call>|$)/g, "");
+      cleanReply = cleanReply.trim();
+    }
+
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const filename = `chat-${timestamp}.md`;
     
     const debugData = {
       timestamp,
       raw_messages_received: messages,
-      raw_assistant_reply: assistantReply,
+      raw_assistant_reply: assistantReply, // Keep true raw in JSON
       raw_assistant_reasoning: assistantReasoning,
       deepseek_completion_body: completionBody
     };
@@ -61,7 +70,7 @@ function writeChatHistory(messages: any[], assistantReply?: string, assistantRea
       md += "### Raw JSON Sent to DeepSeek\n```json\n" + JSON.stringify(completionBody, null, 2) + "\n```\n\n";
     }
     
-    md += formatMessagesForLog(messages, assistantReply, assistantReasoning);
+    md += formatMessagesForLog(messages, cleanReply, assistantReasoning);
     
     fsLib.writeFileSync(path.join(logsDir, filename), md, "utf-8");
     fsLib.writeFileSync(path.join(logsDir, "chat-LATEST.md"), md, "utf-8");
@@ -78,14 +87,20 @@ interface ModelConfig {
   defaultSearch: boolean;
 }
 
+// DeepSeek web chat internal model_type values (/api/v0/chat/completion):
+//   "instant" — fast V4, same as vision but NO full image upload (OCR only)
+//   "expert"  — V4 with deep thinking/reasoning
+//   "vision"  — V4 multimodal, full image understanding
+// Old aliases (v3, r1, chat, reasoner, default) are deprecated — map to correct backend.
 const MODEL_MAP: Record<string, ModelConfig> = {
-  "deepseek-chat": { model_type: "default", defaultThinking: false, defaultSearch: true },
-  "deepseek-instant": { model_type: "default", defaultThinking: false, defaultSearch: true },
-  "deepseek-v3": { model_type: "default", defaultThinking: false, defaultSearch: true },
-  "deepseek-reasoner": { model_type: "expert", defaultThinking: true, defaultSearch: true },
-  "deepseek-expert": { model_type: "expert", defaultThinking: true, defaultSearch: true },
-  "deepseek-r1": { model_type: "expert", defaultThinking: true, defaultSearch: true },
-  "deepseek-vision": { model_type: "vision", defaultThinking: false, defaultSearch: true },
+  "deepseek-instant":  { model_type: "instant", defaultThinking: true, defaultSearch: false },
+  "deepseek-expert":   { model_type: "expert",  defaultThinking: true, defaultSearch: false },
+  "deepseek-vision":   { model_type: "vision",  defaultThinking: true, defaultSearch: false },
+  "deepseek-chat":     { model_type: "instant", defaultThinking: true, defaultSearch: false },
+  "deepseek-v3":       { model_type: "instant", defaultThinking: true, defaultSearch: false },
+  "deepseek-v4":       { model_type: "instant", defaultThinking: true, defaultSearch: false },
+  "deepseek-r1":       { model_type: "expert",  defaultThinking: true, defaultSearch: false },
+  "deepseek-reasoner": { model_type: "expert",  defaultThinking: true, defaultSearch: false },
 };
 
 function resolveModel(model: string): ModelConfig {
@@ -101,33 +116,103 @@ function extractContent(content: string | { type: string; text?: string }[] | nu
     .join("\n");
 }
 
+function extractToolResult(content: any): string {
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    // AI SDK v5: content is array of parts
+    const parts: string[] = [];
+    for (const p of content) {
+      if (p.type === "text") parts.push(p.text ?? "");
+      else if (p.type === "tool-result") {
+        // result can be string or {output: string} or array
+        const r = p.result;
+        if (typeof r === "string") parts.push(r);
+        else if (r && typeof r === "object") parts.push(r.output ?? r.text ?? JSON.stringify(r));
+        else if (Array.isArray(r)) parts.push(r.map((x: any) => x.text ?? JSON.stringify(x)).join("\n"));
+      }
+    }
+    return parts.join("\n");
+  }
+  if (typeof content === "object" && content.output) return String(content.output);
+  return String(content);
+}
+
 function cleanMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
   const cleaned: OpenAIMessage[] = [];
   for (const m of messages) {
+    // OpenAI-style role=tool (legacy & AI SDK v4)
     if (m.role === "tool") {
       const name = (m as any).name || m.tool_call_id || "tool";
-      cleaned.push({ role: "user", content: `<tool_result name="${name}">\n<output>\n${extractContent(m.content)}\n</output>\n</tool_result>\n\nTool execution completed. If the task is NOT complete, issue your next <tool_call> immediately without text. If the task is fully complete, provide your final response to the user.` });
+      const output = extractToolResult(m.content);
+      cleaned.push({ role: "user", content: `<tool_result name="${name}">\n<output>\n${output}\n</output>\n</tool_result>\n\nTool execution completed. If the task is NOT complete, issue your next <tool_call> immediately without text. If the task is fully complete, provide your final response to the user.` });
       continue;
     }
+
+    // AI SDK v5: assistant with content array containing tool-call/tool-result parts
+    if (m.role === "assistant" && Array.isArray(m.content)) {
+      const parts = m.content as any[];
+      const toolCalls = parts.filter((p: any) => p.type === "tool-call");
+      const textParts = parts.filter((p: any) => p.type === "text").map((p: any) => p.text ?? "").join("");
+
+      if (toolCalls.length > 0) {
+        const callsText = toolCalls.map((c: any) =>
+          `<tool_call>\n{"name": "${c.toolName}", "arguments": ${typeof c.input === "string" ? c.input : JSON.stringify(c.input ?? {})}}\n</tool_call>`
+        ).join("\n\n");
+        const combined = textParts ? `${textParts}\n\n${callsText}` : callsText;
+        cleaned.push({ role: "assistant", content: combined });
+        continue;
+      }
+      if (!textParts.trim()) continue; // skip empty assistant
+      cleaned.push({ role: "assistant", content: textParts });
+      continue;
+    }
+
+    // AI SDK v5: user message with tool-result parts in content array
+    if (m.role === "user" && Array.isArray(m.content) && (m.content as any[]).some((p: any) => p.type === "tool-result")) {
+      const parts = (m.content as any[]) ?? [];
+      const resultParts = parts.filter((p: any) => p.type === "tool-result");
+      if (resultParts.length > 0) {
+        const results = resultParts.map((p: any) => {
+          const name = p.toolName || p.toolCallId || "tool";
+          const output = extractToolResult(p.result ?? p.content);
+          return `<tool_result name="${name}">\n<output>\n${output}\n</output>\n</tool_result>`;
+        }).join("\n\n");
+        cleaned.push({ role: "user", content: `${results}\n\nTool execution completed. If the task is NOT complete, issue your next <tool_call> immediately without text. If the task is fully complete, provide your final response to the user.` });
+        continue;
+      }
+      // Regular user message (not tool-result)
+      const text = extractContent(m.content);
+      if (text.trim()) cleaned.push({ ...m, content: text } as OpenAIMessage);
+      continue;
+    }
+
+    // OpenAI-style assistant with tool_calls field
     if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
       const callsText = m.tool_calls.map((c: any) => `<tool_call>\n{"name": "${c.function.name}", "arguments": ${c.function.arguments}}\n</tool_call>`).join("\n\n");
       const text = extractContent(m.content);
-      const combined = text ? `${text}\n\n${callsText}` : callsText;
-      cleaned.push({ role: "assistant", content: combined });
+      cleaned.push({ role: "assistant", content: text ? `${text}\n\n${callsText}` : callsText });
       continue;
     }
+
+    // Skip empty assistant messages
+    if (m.role === "assistant" && !m.tool_calls) {
+      const text = extractContent(m.content);
+      if (!text.trim()) continue;
+    }
+
     const { tool_calls: _, ...rest } = m;
     cleaned.push(rest as OpenAIMessage);
   }
+
+  // Deduplicate consecutive same-role messages by merging content
   const deduped: OpenAIMessage[] = [];
   for (const m of cleaned) {
     if (deduped.length > 0 && deduped[deduped.length - 1].role === m.role) {
       const prev = deduped[deduped.length - 1];
       const prevText = extractContent(prev.content);
       const curText = extractContent(m.content);
-      if (curText) {
-        prev.content = prevText ? `${prevText}\n\n${curText}` : curText;
-      }
+      if (curText) prev.content = prevText ? `${prevText}\n\n${curText}` : curText;
     } else {
       deduped.push(m);
     }
@@ -182,6 +267,9 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
 
       if (path === "/v1/chat/completions" || path === "/chat/completions") {
         const body = JSON.parse(await request.text()) as OpenAIChatRequest;
+        // DEBUG: dump full messages to see AI SDK v5 format
+        fsLib.writeFileSync("C:\\RedSeek\\logs\\debug-messages-latest.json", JSON.stringify(body.messages, null, 2), "utf-8");
+        
         
         const baseOpencodeSession = request.headers.get("x-opencode-session") || "default";
         const hasTools = body.tools && body.tools.length > 0;
@@ -679,7 +767,9 @@ async function handleStreamingResponse(
 
         contentBuffer += content;
         reasoningBuffer += reasoning;
-        fullContentBuffer += content;
+        if (!isToolCall) {
+          fullContentBuffer += content;
+        }
         fullReasoningBuffer += reasoning;
         totalOutputLength += content.length + reasoning.length;
 
@@ -688,9 +778,12 @@ async function handleStreamingResponse(
             isToolCall = true;
             contentBuffer = contentBuffer.slice(contentBuffer.indexOf("[SYSTEM_TOOLS]"));
             checkedToolCall = true;
-          } else if (contentBuffer.includes("<｜｜DSML｜｜")) {
+          } else if (contentBuffer.includes("<｜｜DSML｜｜") || contentBuffer.includes("<ï½œï½œDSMLï½œï½œ")) {
             isToolCall = true;
-            contentBuffer = contentBuffer.slice(contentBuffer.indexOf("<｜｜DSML｜｜"));
+            const idx1 = contentBuffer.indexOf("<｜｜DSML｜｜");
+            const idx2 = contentBuffer.indexOf("<ï½œï½œDSMLï½œï½œ");
+            const idx = idx1 !== -1 && idx2 !== -1 ? Math.min(idx1, idx2) : (idx1 !== -1 ? idx1 : idx2);
+            contentBuffer = contentBuffer.slice(idx);
             checkedToolCall = true;
           } else if (contentBuffer.includes("<tool_call>")) {
             isToolCall = true;
@@ -722,131 +815,178 @@ async function handleStreamingResponse(
           contentBuffer = "";
 
           if (done) {
-            let parsedCall: any = null;
+            let parsedCalls: any[] = [];
             console.log("Stream DONE. toolCallBuffer:", JSON.stringify(toolCallBuffer));
 
+            // Helper to normalize the weird DSML unicode mangling
+            const normalizedBuffer = toolCallBuffer.replace(/<ï½œï½œDSMLï½œï½œ/g, "<｜｜DSML｜｜").replace(/<\/ï½œï½œDSMLï½œï½œ/g, "</｜｜DSML｜｜");
+
             // Strategy 0: DSML XML parsing
-            if (toolCallBuffer.includes("[SYSTEM_TOOLS]")) {
-              const nameMatch = toolCallBuffer.match(/<tool_call[^>]*name=["']([^"']+)["'][^>]*>/) || toolCallBuffer.match(/<name>([^<]+)<\/name>/) || toolCallBuffer.match(/name=["']([^"']+)["']/);
-              const argsMatch = toolCallBuffer.match(/<arguments>([\s\S]*?)<\/arguments>/) || toolCallBuffer.match(/<parameters>([\s\S]*?)<\/parameters>/) || toolCallBuffer.match(/>([\s\S]*?)<\/tool_call>/) || toolCallBuffer.match(/\{[\s\S]*\}/);
+            if (normalizedBuffer.includes("[SYSTEM_TOOLS]")) {
+              const nameMatch = normalizedBuffer.match(/<tool_call[^>]*name=["']([^"']+)["'][^>]*>/) || normalizedBuffer.match(/<name>([^<]+)<\/name>/) || normalizedBuffer.match(/name=["']([^"']+)["']/);
+              const argsMatch = normalizedBuffer.match(/<arguments>([\s\S]*?)<\/arguments>/) || normalizedBuffer.match(/<parameters>([\s\S]*?)<\/parameters>/) || normalizedBuffer.match(/>([\s\S]*?)<\/tool_call>/) || normalizedBuffer.match(/\{[\s\S]*\}/);
               if (nameMatch) {
                 const name = nameMatch[1].trim();
                 let args = argsMatch ? argsMatch[1].trim() : "{}";
                 const jsonMatch = args.match(/\{[\s\S]*\}/);
                 if (jsonMatch) args = jsonMatch[0];
-                parsedCall = { name, arguments: args };
-                try { JSON.parse(args); } catch { parsedCall = null; }
+                try { JSON.parse(args); parsedCalls.push({ name, arguments: args }); } catch {}
               }
             }
-            // Strategy 1: XML parsing (<tool_call>JSON</tool_call>) or <｜｜DSML｜｜tool_call>
-            if (!parsedCall && (toolCallBuffer.includes("<tool_call>") || toolCallBuffer.includes("DSML"))) {
-              let rawJson = toolCallBuffer;
-              const extractJsonMatch = rawJson.match(/\{[\s\S]*\}/);
-              if (extractJsonMatch) {
-                rawJson = extractJsonMatch[0];
+            // Strategy 1: <tool_call>JSON</tool_call> or <｜｜DSML｜｜tool_call>{"name":...,"arguments":{...}}</｜｜DSML｜｜tool_call>
+            if (parsedCalls.length === 0 && (normalizedBuffer.includes("<tool_call>") || normalizedBuffer.includes("DSML"))) {
+              const afterOpenTag = normalizedBuffer.replace(/^[\s\S]*?(?:<tool_call>|<｜｜DSML｜｜tool_call>)/, "");
+              const jsonMatch = afterOpenTag.match(/\{[\s\S]*\}/);
+              if (jsonMatch) {
+                try {
+                  const parsed = JSON.parse(jsonMatch[0]);
+                  if (parsed.name) {
+                    const args = parsed.arguments ?? parsed.parameters ?? parsed;
+                    parsedCalls.push({
+                      name: parsed.name,
+                      arguments: typeof args === "string" ? args : JSON.stringify(
+                        parsed.arguments ? parsed.arguments : 
+                        (({ name: _n, description: _d, ...rest }) => rest)(parsed)
+                      )
+                    });
+                  }
+                } catch (e) {}
               }
-              try { parsedCall = JSON.parse(rawJson); console.log("Parsed Strategy 1:", parsedCall); } catch (e) { console.error("Strategy 1 parse error", e, rawJson); }
             }
             // Strategy 2: Hermes MCP XML (<use_mcp_tool>)
-            if (!parsedCall && toolCallBuffer.includes("<use_mcp_tool>")) {
-              const serverMatch = toolCallBuffer.match(/<server_name>(.*?)<\/server_name>/);
-              const toolMatch = toolCallBuffer.match(/<tool_name>(.*?)<\/tool_name>/);
-              const argsMatch = toolCallBuffer.match(/<arguments>([\s\S]*?)<\/arguments>/);
+            if (parsedCalls.length === 0 && normalizedBuffer.includes("<use_mcp_tool>")) {
+              const serverMatch = normalizedBuffer.match(/<server_name>(.*?)<\/server_name>/);
+              const toolMatch = normalizedBuffer.match(/<tool_name>(.*?)<\/tool_name>/);
+              const argsMatch = normalizedBuffer.match(/<arguments>([\s\S]*?)<\/arguments>/);
               if (toolMatch && argsMatch) {
                 let name = toolMatch[1].trim();
                 if (serverMatch) name = `mcp__${serverMatch[1].trim()}__${name}`;
                 try {
                   const args = argsMatch[1].trim();
                   JSON.parse(args);
-                  parsedCall = { name, arguments: args };
+                  parsedCalls.push({ name, arguments: args });
                 } catch {}
               }
             }
             // Strategy 5: DeepSeek Native DSML (<｜｜DSML｜｜)
-            if (!parsedCall && toolCallBuffer.includes("<｜｜DSML｜｜")) {
-              const nameMatch = toolCallBuffer.match(/<｜｜DSML｜｜invoke[^>]*name=["']([^"']+)["']/);
-              if (nameMatch) {
-                let name = nameMatch[1].trim();
+            if (parsedCalls.length === 0 && normalizedBuffer.includes("<｜｜DSML｜｜")) {
+              // Extract ALL <｜｜DSML｜｜ invoke> blocks
+              const invokeRegex = /<｜｜DSML｜｜\s*invoke[^>]*name=["']([^"']+)["'][^>]*>([\s\S]*?)<\/｜｜DSML｜｜\s*invoke>/g;
+              let invokeMatch;
+              while ((invokeMatch = invokeRegex.exec(normalizedBuffer)) !== null) {
+                let name = invokeMatch[1].trim();
                 if (name === "exec_command") name = "bash";
                 if (name === "read_file") name = "read";
                 if (name === "write_file") name = "write";
                 
+                const innerBody = invokeMatch[2];
                 const argsObj: Record<string, string> = {};
-                const paramRegex = /<｜｜DSML｜｜parameter[^>]*name=["']([^"']+)["'][^>]*>([\s\S]*?)<\/｜｜DSML｜｜parameter>/g;
+                const paramRegex = /<｜｜DSML｜｜\s*parameter[^>]*name=["']([^"']+)["'][^>]*>([\s\S]*?)<\/｜｜DSML｜｜\s*parameter>/g;
                 let m;
-                while ((m = paramRegex.exec(toolCallBuffer)) !== null) {
+                while ((m = paramRegex.exec(innerBody)) !== null) {
                   let val = m[2].trim();
-                  // map internal tool params to expected ones
                   if (name === "bash" && m[1] === "cmd") argsObj["command"] = val;
                   else argsObj[m[1]] = val;
                 }
-                parsedCall = { name, arguments: JSON.stringify(argsObj) };
+                parsedCalls.push({ name, arguments: JSON.stringify(argsObj) });
+              }
+              // Fallback if the regex failed but it looks like a single invoke without closing tag
+              if (parsedCalls.length === 0) {
+                  const nameMatch = normalizedBuffer.match(/<｜｜DSML｜｜\s*invoke[^>]*name=["']([^"']+)["']/);
+                  if (nameMatch) {
+                    let name = nameMatch[1].trim();
+                    if (name === "exec_command") name = "bash";
+                    if (name === "read_file") name = "read";
+                    if (name === "write_file") name = "write";
+                    
+                    const argsObj: Record<string, string> = {};
+                    const paramRegex = /<｜｜DSML｜｜\s*parameter[^>]*name=["']([^"']+)["'][^>]*>([\s\S]*?)<\/｜｜DSML｜｜\s*parameter>/g;
+                    let m;
+                    while ((m = paramRegex.exec(normalizedBuffer)) !== null) {
+                      let val = m[2].trim();
+                      if (name === "bash" && m[1] === "cmd") argsObj["command"] = val;
+                      else argsObj[m[1]] = val;
+                    }
+                    parsedCalls.push({ name, arguments: JSON.stringify(argsObj) });
+                  }
               }
             }
             // Strategy 3: ReAct parsing (Action: name \n Action Input: {...})
-            if (!parsedCall && toolCallBuffer.includes("Action:")) {
-              const actionMatch = toolCallBuffer.match(/Action:\s*([^\n]+)/);
-              const inputMatch = toolCallBuffer.match(/Action Input:\s*([\s\S]+)/);
+            if (parsedCalls.length === 0 && normalizedBuffer.includes("Action:")) {
+              const actionMatch = normalizedBuffer.match(/Action:\s*([^\n]+)/);
+              const inputMatch = normalizedBuffer.match(/Action Input:\s*([\s\S]+)/);
               if (actionMatch && inputMatch) {
                 const name = actionMatch[1].trim();
                 let args = inputMatch[1].trim();
                 args = args.replace(/^```(?:json)?\n?/, "").replace(/```$/, "").trim();
-                parsedCall = { name, arguments: args };
-                try { JSON.parse(args); } catch { parsedCall = null; }
+                try { JSON.parse(args); parsedCalls.push({ name, arguments: args }); } catch {}
               }
             }
             // Strategy 4: Hallucinated <function=NAME> ... </function>
-            if (!parsedCall && toolCallBuffer.includes("<function=")) {
-              const nameMatch = toolCallBuffer.match(/<function=([^>]+)>/);
+            if (parsedCalls.length === 0 && normalizedBuffer.includes("<function=")) {
+              const nameMatch = normalizedBuffer.match(/<function=([^>]+)>/);
               if (nameMatch) {
                 const name = nameMatch[1].trim();
                 const args: Record<string, string> = {};
-                const tags = toolCallBuffer.matchAll(/<([a-zA-Z0-9_]+)>([\s\S]*?)<\/\1>/g);
+                const tags = normalizedBuffer.matchAll(/<([a-zA-Z0-9_]+)>([\s\S]*?)<\/\1>/g);
                 for (const match of tags) {
                   if (match[1] !== "function") args[match[1]] = match[2].trim();
                 }
-                parsedCall = { name, arguments: JSON.stringify(args) };
+                parsedCalls.push({ name, arguments: JSON.stringify(args) });
               }
             }
             // Strategy 5: Raw markdown JSON block (```json {...} ```)
-            if (!parsedCall && toolCallBuffer.includes("```json")) {
-              const match = toolCallBuffer.match(/```json\s*([\s\S]*?)```/);
-              const rawJson = match ? match[1].trim() : toolCallBuffer.replace(/```json/g, "").replace(/```/g, "").trim();
+            if (parsedCalls.length === 0 && normalizedBuffer.includes("```json")) {
+              const match = normalizedBuffer.match(/```json\s*([\s\S]*?)```/);
+              const rawJson = match ? match[1].trim() : normalizedBuffer.replace(/```json/g, "").replace(/```/g, "").trim();
               try {
                 const parsed = JSON.parse(rawJson);
                 const name = parsed.tool || parsed.name || parsed.action || parsed.function;
-                if (name) parsedCall = { name, arguments: parsed.arguments || parsed.parameters || JSON.stringify(parsed) };
+                if (name) parsedCalls.push({ name, arguments: parsed.arguments || parsed.parameters || JSON.stringify(parsed) });
               } catch {}
             }
 
-            if (!parsedCall || !parsedCall.name) {
-              console.log("Malformed tool call, falling back to text", toolCallBuffer);
-              // Malformed — emit as text
-              const delta: OpenAIChatChunk["choices"][0]["delta"] = { content: toolCallBuffer };
-              const chunk: OpenAIChatChunk = { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: null }] };
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+            if (parsedCalls.length === 0) {
+              // Malformed/unparseable tool call — discard silently, do NOT leak raw tags to chat
+              // Log the raw buffer so we can analyze the exact DSML syntax it uses
+              fsLib.writeFileSync("C:\\RedSeek\\logs\\debug-dsml-failed.txt", toolCallBuffer, "utf-8");
+              
+              const hasToolMarkers = normalizedBuffer.includes("<｜｜DSML｜｜") ||
+                normalizedBuffer.includes("<tool_call>") ||
+                normalizedBuffer.includes("[SYSTEM_TOOLS]") ||
+                normalizedBuffer.includes("<use_mcp_tool>") ||
+                normalizedBuffer.includes("<function=");
+              if (!hasToolMarkers) {
+                // Pure text that got misidentified — emit it as normal text
+                const delta: OpenAIChatChunk["choices"][0]["delta"] = { content: toolCallBuffer };
+                const chunk: OpenAIChatChunk = { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: null }] };
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+              }
+              // Tool markers: silently discard — proxy already tried all strategies
               return;
             }
 
-            // Emit the tool_calls delta
+            // Emit the tool_calls delta (without finish_reason)
             const delta: OpenAIChatChunk["choices"][0]["delta"] = {
-              tool_calls: [{
-                index: 0,
-                id: `call_${Date.now()}`,
+              tool_calls: parsedCalls.map((call, idx) => ({
+                index: idx,
+                id: `call_${Date.now()}_${idx}`,
                 type: "function",
                 function: {
-                  name: parsedCall.name,
-                  arguments: typeof parsedCall.arguments === "string"
-                    ? parsedCall.arguments
-                    : JSON.stringify(parsedCall.arguments || {})
+                  name: call.name,
+                  arguments: typeof call.arguments === "string"
+                    ? call.arguments
+                    : JSON.stringify(call.arguments || {})
                 }
-              }]
+              }))
             };
-            // finish_reason MUST be "tool_calls" so Hermes knows to continue the agentic loop
-            const chunk: OpenAIChatChunk = { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: "tool_calls" as any }] };
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+            const callChunk: OpenAIChatChunk = { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: null }] };
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(callChunk)}\n\n`));
+
+            // Emit the finish_reason chunk (empty delta)
+            const finishChunk: OpenAIChatChunk = { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" as any }] };
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(finishChunk)}\n\n`));
             
-            if (messages) writeChatHistory(messages, fullContentBuffer, fullReasoningBuffer, completionBody);
             streamFinished = true;
             closeStream();
           }
@@ -889,7 +1029,6 @@ async function handleStreamingResponse(
           }
 
           if (done) {
-            if (messages) writeChatHistory(messages, fullContentBuffer, fullReasoningBuffer, completionBody);
             streamFinished = true;
             debug("stream done by parser, id:", id);
             closeStream();
@@ -983,9 +1122,10 @@ async function handleNonStreamingResponse(
   };
 
   console.log("handleNonStreamingResponse -> fullContent", fullContent);
-  if (fullContent.trim().startsWith("<tool_call>") || fullContent.trim().startsWith("<｜｜DSML｜｜tool_call>")) {
+  if (fullContent.trim().startsWith("<tool_call>") || fullContent.trim().startsWith("<｜｜DSML｜｜tool_call>") || fullContent.trim().startsWith("<ï½œï½œDSMLï½œï½œtool_call>")) {
     const cleanedJson = fullContent.replace(/<tool_call>/g, "").replace(/<\/tool_call>/g, "")
-                                   .replace(/<｜｜DSML｜｜tool_call>/g, "").replace(/<\/｜｜DSML｜｜tool_call>/g, "").trim();
+                                   .replace(/<｜｜DSML｜｜tool_call>/g, "").replace(/<\/｜｜DSML｜｜tool_call>/g, "")
+                                   .replace(/<ï½œï½œDSMLï½œï½œtool_call>/g, "").replace(/<\/ï½œï½œDSMLï½œï½œtool_call>/g, "").trim();
     console.log("Non-streaming parsed cleanedJson", cleanedJson);
     try {
       const parsedCall = JSON.parse(cleanedJson);
