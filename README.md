@@ -55,18 +55,43 @@ Then just run `hermes chat` — the proxy is always silently running in the back
 | `deepseek-oauth uninstall` | Remove the auto-startup task |
 | `deepseek-oauth serve` | Run the proxy in the foreground (for debugging) |
 
-## 🔌 OpenAI API endpoint
+## 🔌 Dual-Mode Endpoint (HTTP & IPC)
 
+**Standard HTTP (OpenAI Compatible):**
 ```
 http://127.0.0.1:10531/v1
 ```
-
 Compatible with **any** OpenAI SDK client. No API key required — pass anything as the key.
+
+**Ultra-low Latency IPC (Windows Named Pipes):**
+```
+\\.\pipe\ddae_ipc
+```
+For local applications (like game engines or high-speed agents), you can bypass HTTP entirely. Just write a JSON payload to the pipe and read the response. 
+
+**Python IPC Example:**
+```python
+import json
+
+with open(r'\\.\pipe\ddae_ipc', 'r+b', buffering=0) as pipe:
+    # 1. Write Request
+    req = json.dumps({"model": "chat", "messages": [{"role": "user", "content": "Hi"}]})
+    pipe.write(req.encode('utf-8'))
+    
+    # 2. Read Response
+    response_data = b""
+    while True:
+        chunk = pipe.read(4096)
+        if not chunk: break
+        response_data += chunk
+        
+    print(json.loads(response_data.decode('utf-8')))
+```
 
 ## 🧠 What's inside
 
-- **Base64 WASM solver** — Native WebAssembly Proof-of-Work, inlined into the binary. No compiler needed.
-- **Worker Threads** — PoW runs off the main thread so the event loop never freezes.
+- **Synchronous WASM PoW solver** — Native WebAssembly Proof-of-Work, instantly solves DeepSeek challenges on the main thread without fragile worker files.
+- **Dual-Mode Networking** — Exposes both HTTP and Windows Named Pipes simultaneously.
 - **Tool call translation** — Converts `<tool_call>` responses into OpenAI `tool_calls` chunks so autonomous agents actually work.
 - **Streaming usage chunks** — Emits token counts so Hermes' context bar tracks correctly.
 - **Rate-limiting Mutex** — Prevents concurrent request storms from getting your account banned.
