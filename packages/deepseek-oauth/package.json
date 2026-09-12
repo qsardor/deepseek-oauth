@@ -6,7 +6,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "deepseek-oauth": "./dist/cli.js"
+    "deepseek-oauth": "dist/cli.js"
   },
   "exports": {
     ".": {
@@ -15,15 +15,24 @@
     }
   },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
+    "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=dist/cli.js --external:playwright --external:yargs",
+    "dev": "esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=dist/cli.js --external:playwright --external:yargs --watch",
     "prepublishOnly": "npm run build",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "serve": "node dist/cli.js serve",
     "login": "node dist/cli.js login"
   },
-  "files": ["dist"],
-  "keywords": ["deepseek", "proxy", "oauth", "cli", "redseek", "ai"],
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "deepseek",
+    "proxy",
+    "oauth",
+    "cli",
+    "redseek",
+    "ai"
+  ],
   "author": "qsardor",
   "license": "MIT",
   "repository": {
@@ -31,8 +40,6 @@
     "url": "git+https://github.com/qsardor/redseek.git"
   },
   "dependencies": {
-    "@deepseek-oauth/core": "*",
-    "@deepseek-oauth/local": "*",
     "yargs": "^17.7.2"
   },
   "optionalDependencies": {
@@ -41,6 +48,7 @@
   "devDependencies": {
     "@types/node": "^26.1.1",
     "@types/yargs": "^17.0.33",
+    "esbuild": "^0.28.2",
     "typescript": "^5.9.2"
   },
   "engines": {
