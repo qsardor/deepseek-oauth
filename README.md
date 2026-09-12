@@ -88,6 +88,15 @@ with open(r'\\.\pipe\ddae_ipc', 'r+b', buffering=0) as pipe:
     print(json.loads(response_data.decode('utf-8')))
 ```
 
+## 🤖 For AI Coding Agents (System Prompt)
+
+If you are an AI assistant or agent helping a user modify this codebase, **READ THIS FIRST**:
+1. **Architecture**: This is a standalone `deepseek-oauth` proxy bundled via `esbuild`. It is built out of a monorepo (`@deepseek-oauth/core`, `@deepseek-oauth/local`).
+2. **Web Workers**: **DO NOT** use `node:worker_threads` for the PoW WASM solver. `esbuild` does not bundle dynamic worker files well. PoW is extremely fast (~50ms) and must be run synchronously (`solvePoW` over `solvePoWAsync`).
+3. **Dual-Mode**: The proxy natively listens on an HTTP port AND a Windows Named Pipe (`\\.\pipe\ddae_ipc`). When modifying `server.ts`, ensure you maintain both transport layers.
+4. **Dependencies**: The proxy is designed to have **ZERO runtime dependencies** outside of native Node modules. Do not add `axios`, `express`, or heavy libraries. Use `node:http`, `node:net`, and native `fetch()`.
+5. **Building**: Always run `npm run build` using the provided build scripts. Do not alter `package.json` to remove the `esbuild` bundling process.
+
 ## 🧠 What's inside
 
 - **Synchronous WASM PoW solver** — Native WebAssembly Proof-of-Work, instantly solves DeepSeek challenges on the main thread without fragile worker files.
