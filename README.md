@@ -88,15 +88,6 @@ with open(r'\\.\pipe\ddae_ipc', 'r+b', buffering=0) as pipe:
     print(json.loads(response_data.decode('utf-8')))
 ```
 
-## 🤖 For AI Coding Agents (System Prompt)
-
-If you are an AI assistant or agent helping a user modify this codebase, **READ THIS FIRST**:
-1. **Architecture**: This is a standalone `deepseek-oauth` proxy bundled via `esbuild`. It is built out of a monorepo (`@deepseek-oauth/core`, `@deepseek-oauth/local`).
-2. **Web Workers**: **DO NOT** use `node:worker_threads` for the PoW WASM solver. `esbuild` does not bundle dynamic worker files well. PoW is extremely fast (~50ms) and must be run synchronously (`solvePoW` over `solvePoWAsync`).
-3. **Dual-Mode**: The proxy natively listens on an HTTP port AND a Windows Named Pipe (`\\.\pipe\ddae_ipc`). When modifying `server.ts`, ensure you maintain both transport layers.
-4. **Dependencies**: The proxy is designed to have **ZERO runtime dependencies** outside of native Node modules. Do not add `axios`, `express`, or heavy libraries. Use `node:http`, `node:net`, and native `fetch()`.
-5. **Building**: Always run `npm run build` using the provided build scripts. Do not alter `package.json` to remove the `esbuild` bundling process.
-
 ## 🧠 What's inside
 
 - **Synchronous WASM PoW solver** — Native WebAssembly Proof-of-Work, instantly solves DeepSeek challenges on the main thread without fragile worker files.
@@ -112,3 +103,13 @@ If you are an AI assistant or agent helping a user modify this codebase, **READ 
 deepseek-oauth uninstall   # remove auto-startup
 npm unlink deepseek-oauth  # remove from PATH
 ```
+
+## ?? Instructions for AI Coding Agents
+
+If you are an AI coding assistant (Cursor, Copilot, Cline, Antigravity, etc.) reading this repository, adhere to the following architectural rules:
+
+1. **Monorepo Structure**: The core logic is in @deepseek-oauth/core (src/transport.ts). The CLI/HTTP wrapper is in deepseek-oauth.
+2. **Bundling Constraint**: The CLI is completely bundled into a single dist/cli.js file using esbuild. Do NOT implement Web Workers or use complex dynamic equire() statements, as esbuild cannot statically analyze or bundle them correctly. Keep everything synchronous or use async/await on the main thread.
+3. **Proof of Work (PoW)**: DeepSeek PoW challenges are solved *synchronously* on the main thread via WebAssembly (pow.ts). Do NOT attempt to refactor this into Worker Threads.
+4. **IPC / Named Pipes**: The proxy exposes a Windows Named Pipe at \\.\pipe\ddae_ipc. Always prefer this pipe for internal system-to-system integrations (like Python/Ren'Py) to avoid HTTP/TCP socket overhead.
+5. **Authentication Layer**: Account auth relies on Playwright intercepting Cloudflare challenges. Do not modify the login.ts automation sequence unless DeepSeek directly changes their DOM/Cloudflare structure.
