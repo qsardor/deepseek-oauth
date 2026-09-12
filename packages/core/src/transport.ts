@@ -89,7 +89,7 @@ interface ModelConfig {
 }
 
 // DeepSeek unified model (as of Sept 2026 — Instant/Expert/Vision merged into one backend)
-const UNIFIED_MODEL: ModelConfig = { model_type: "chat", defaultThinking: true, defaultSearch: false };
+const UNIFIED_MODEL: ModelConfig = { model_type: "DEFAULT", defaultThinking: true, defaultSearch: false };
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 function resolveModel(_model: string): ModelConfig {
@@ -383,15 +383,16 @@ async function handleChatCompletions(
     headers0.cookie = buildCookieHeader(session.cookies);
     headers0["x-ds-pow-response"] = powEncoded0;
 
+    const prompt = turn0Prompt;
     const response0 = await fetch(`${BASE_URL}/api/v0/chat/completion`, {
       method: "POST",
       headers: headers0,
       body: JSON.stringify({
         chat_session_id: chatSessionId,
         parent_message_id: null,
-        prompt: turn0Prompt,
+        prompt: prompt,
         ref_file_ids: [],
-        thinking_enabled: false,
+        thinking_enabled: true,
         search_enabled: false,
         action: null,
         preempt: false,
@@ -401,6 +402,9 @@ async function handleChatCompletions(
     });
     
     console.log("[PROXY] Turn 0 Status:", response0.status);
+    if (!response0.ok) {
+        console.log("[PROXY] Turn 0 Error Body:", await response0.text());
+    }
 
     // 4. Consume the streaming response silently to get the new parent_message_id
     if (response0.ok && response0.body) {
@@ -409,18 +413,30 @@ async function handleChatCompletions(
       let msgId0: number | null = null;
       
       const parser0 = new DeepSeekSSEParser((_c, _r, _done, msgId) => {
-        if (msgId != null) msgId0 = msgId;
+        if (msgId != null && !msgId0) msgId0 = msgId;
       });
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        parser0.feed(decoder.decode(value, { stream: true }));
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunkStr = decoder.decode(value, { stream: true });
+          
+          // Only log if the chunk contains an error (like user is muted)
+          if (chunkStr.includes('"biz_code"') && !chunkStr.includes('"biz_code":0')) {
+             console.log("[PROXY] Turn 0 Error Chunk:", chunkStr.trim());
+          }
+          
+          parser0.feed(chunkStr);
+        }
+      } catch (e) {
+         console.log("[PROXY] Turn 0 parsing error:", e);
+      } finally {
+        parser0.flush();
       }
-      parser0.flush();
 
-      console.log("[PROXY] Turn 0 msgId0 extracted:", msgId0);
       if (msgId0 != null && messageIds) {
+
         messageIds.set(chatSessionId, msgId0);
       }
     }
