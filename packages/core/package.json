@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-oauth/core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -15,7 +15,10 @@
     "dev": "tsc --watch",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\""
   },
-  "files": ["dist", "solver.wasm"],
+  "files": [
+    "dist",
+    "solver.wasm"
+  ],
   "devDependencies": {
     "typescript": "^5.9.2"
   }

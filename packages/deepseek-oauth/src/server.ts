@@ -1,4 +1,5 @@
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
+import { createServer as createTcpServer, type Socket } from "node:net";
 import { createDeepSeekTransport, deleteChatSession } from "@deepseek-oauth/core";
 import { LoginRequired, deepSeekCredentials } from "@deepseek-oauth/local";
 import { readBody, sendJson, sendText } from "./shared.js";
@@ -99,6 +100,41 @@ export async function startServer(options: ServerOptions): Promise<ServerInstanc
     });
   });
 
+  const tcpServer = createTcpServer((socket: Socket) => {
+    socket.on('data', async (data) => {
+      try {
+        const payloadStr = data.toString('utf-8');
+        const controller = new AbortController();
+        socket.on('close', () => controller.abort());
+        socket.on('error', () => controller.abort());
+        
+        const response = await transport.fetch(
+          new Request(`http://localhost/v1/chat/completions`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: payloadStr,
+            signal: controller.signal,
+          })
+        );
+        
+        const responseData = await response.text();
+        socket.write(responseData);
+        socket.end();
+      } catch(e) {
+        console.error("TCP Error:", e);
+        socket.end();
+      }
+    });
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    tcpServer.on("error", reject);
+    tcpServer.listen('\\\\.\\pipe\\ddae_ipc', () => {
+      tcpServer.removeListener("error", reject);
+      resolve();
+    });
+  });
+
   let closedResolve: () => void;
   let closedReject: (err: Error) => void;
   const closedPromise = new Promise<void>((resolve, reject) => {
@@ -121,6 +157,7 @@ export async function startServer(options: ServerOptions): Promise<ServerInstanc
     if (closed) return;
     closed = true;
     server.close();
+    tcpServer.close();
   };
 
   const performShutdown = async () => {

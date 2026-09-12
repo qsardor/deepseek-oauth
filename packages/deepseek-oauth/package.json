@@ -1,6 +1,6 @@
 {
   "name": "deepseek-oauth",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DeepSeek OAuth proxy server for RedSeek CLI. Handles authentication and proxies API requests.",
   "type": "module",
   "main": "./dist/index.js",

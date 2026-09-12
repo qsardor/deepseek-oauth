@@ -219,26 +219,13 @@ export function solvePoW(challenge: PoWChallenge): PoWResponse {
   };
 }
 
-import { Worker } from "node:worker_threads";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
 export async function solvePoWAsync(challenge: PoWChallenge): Promise<PoWResponse> {
   return new Promise((resolve, reject) => {
-    const __dirname = dirname(fileURLToPath(import.meta.url));
-    const workerPath = join(__dirname, "pow.worker.js");
-    
-    const worker = new Worker(workerPath);
-    worker.on("message", (msg) => {
-      if (msg.success) resolve(msg.response);
-      else reject(new Error(msg.error));
-      worker.terminate();
-    });
-    worker.on("error", (err) => {
-      reject(err);
-      worker.terminate();
-    });
-    worker.postMessage(challenge);
+    try {
+      resolve(solvePoW(challenge));
+    } catch (e) {
+      reject(e);
+    }
   });
 }
 
