@@ -117,8 +117,11 @@ export async function startServer(options: ServerOptions): Promise<ServerInstanc
           })
         );
         
-        const responseData = await response.text();
-        socket.write(responseData);
+        if (response.body) {
+          for await (const chunk of response.body as any) {
+            socket.write(chunk);
+          }
+        }
         socket.end();
       } catch(e) {
         console.error("TCP Error:", e);
