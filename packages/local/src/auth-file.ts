@@ -33,7 +33,10 @@ export async function loadCredentials(): Promise<StoredCredentials | null> {
       return JSON.parse(decrypted.toString("utf-8")) as StoredCredentials;
     }
     return json as StoredCredentials;
-  } catch {
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') {
+      console.error("Silent Failure: Failed to load credentials from file:", err?.message || err);
+    }
     return null;
   }
 }

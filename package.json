@@ -3,7 +3,9 @@
   "private": true,
   "type": "module",
   "packageManager": "npm@10.9.8",
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "deepseek-oauth-install": "./install.js"
   },
@@ -27,5 +29,9 @@
     "@types/node": "^26.1.1",
     "turbo": "^2.10.4",
     "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }

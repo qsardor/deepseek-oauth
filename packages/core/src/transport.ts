@@ -13,6 +13,7 @@ import type {
 
 import * as path from "path";
 import * as fsLib from "fs";
+import * as osLib from "os";
 
 function formatMessagesForLog(messages: any[], assistantReply?: string, assistantReasoning?: string) {
   let md = "# RedSeek Chat History\n\n";
@@ -40,7 +41,7 @@ function formatMessagesForLog(messages: any[], assistantReply?: string, assistan
 
 function writeChatHistory(messages: any[], assistantReply?: string, assistantReasoning?: string, completionBody?: any) {
   try {
-    const logsDir = path.join("C:\\RedSeek", "logs");
+    const logsDir = process.env.REDSEEK_LOG_DIR ?? path.join(osLib.homedir(), ".redseek", "logs");
     if (!fsLib.existsSync(logsDir)) fsLib.mkdirSync(logsDir, { recursive: true });
     
     // Clean up "leak" from the debug logs
@@ -87,24 +88,12 @@ interface ModelConfig {
   defaultSearch: boolean;
 }
 
-// DeepSeek web chat internal model_type values (/api/v0/chat/completion):
-//   "instant" — fast V4, same as vision but NO full image upload (OCR only)
-//   "expert"  — V4 with deep thinking/reasoning
-//   "vision"  — V4 multimodal, full image understanding
-// Old aliases (v3, r1, chat, reasoner, default) are deprecated — map to correct backend.
-const MODEL_MAP: Record<string, ModelConfig> = {
-  "deepseek-instant":  { model_type: "instant", defaultThinking: true, defaultSearch: false },
-  "deepseek-expert":   { model_type: "expert",  defaultThinking: true, defaultSearch: false },
-  "deepseek-vision":   { model_type: "vision",  defaultThinking: true, defaultSearch: false },
-  "deepseek-chat":     { model_type: "instant", defaultThinking: true, defaultSearch: false },
-  "deepseek-v3":       { model_type: "instant", defaultThinking: true, defaultSearch: false },
-  "deepseek-v4":       { model_type: "instant", defaultThinking: true, defaultSearch: false },
-  "deepseek-r1":       { model_type: "expert",  defaultThinking: true, defaultSearch: false },
-  "deepseek-reasoner": { model_type: "expert",  defaultThinking: true, defaultSearch: false },
-};
+// DeepSeek unified model (as of Sept 2026 — Instant/Expert/Vision merged into one backend)
+const UNIFIED_MODEL: ModelConfig = { model_type: "chat", defaultThinking: true, defaultSearch: false };
 
-function resolveModel(model: string): ModelConfig {
-  return MODEL_MAP[model] ?? MODEL_MAP["deepseek-chat"];
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function resolveModel(_model: string): ModelConfig {
+  return UNIFIED_MODEL;
 }
 
 function extractContent(content: string | { type: string; text?: string }[] | null): string {
@@ -267,8 +256,13 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
 
       if (path === "/v1/chat/completions" || path === "/chat/completions") {
         const body = JSON.parse(await request.text()) as OpenAIChatRequest;
-        // DEBUG: dump full messages to see AI SDK v5 format
-        fsLib.writeFileSync("C:\\RedSeek\\logs\\debug-messages-latest.json", JSON.stringify(body.messages, null, 2), "utf-8");
+        try {
+        const _dbgDir = process.env.REDSEEK_LOG_DIR ?? (osLib.homedir() + "/.redseek/logs");
+        fsLib.mkdirSync(_dbgDir, { recursive: true });
+        fsLib.writeFileSync(_dbgDir + "/debug-messages-latest.json", JSON.stringify(body.messages, null, 2), "utf-8");
+        } catch (err: any) {
+          console.error("Failed to write debug messages:", err?.message || err);
+        }
         
         
         const baseOpencodeSession = request.headers.get("x-opencode-session") || "default";
@@ -292,13 +286,14 @@ export function createDeepSeekTransport(credentials: DeepSeekCredentials) {
 }
 
 async function handleModels(): Promise<Response> {
-  const ids = Object.keys(MODEL_MAP);
-  const data = ids.map((id) => ({
-    id,
-    object: "model",
-    created: Math.floor(Date.now() / 1000),
-    owned_by: "deepseek",
-  }));
+  const data = [
+    {
+      id: "deepseek-chat",
+      object: "model",
+      created: Math.floor(Date.now() / 1000),
+      owned_by: "deepseek",
+    },
+  ];
 
   return new Response(JSON.stringify({ object: "list", data }), {
     headers: { "content-type": "application/json" },
@@ -351,14 +346,13 @@ async function handleChatCompletions(
   const refFileIds: string[] = [];
   const textMessages = hasImages ? stripImageParts(body.messages) : body.messages;
 
-  let effectiveModelType = config.model_type;
+  const effectiveModelType = config.model_type;
 
   if (hasImages) {
-    effectiveModelType = "vision";
     for (const img of images) {
       const buffer = dataUriToBuffer(img.url);
       if (buffer) {
-        const fileId = await uploadFile(session, buffer, "image.png", "vision");
+        const fileId = await uploadFile(session, buffer, "image.png", effectiveModelType);
         if (fileId) refFileIds.push(fileId);
       }
     }
@@ -621,7 +615,8 @@ async function uploadFile(
       }
     }
     return null;
-  } catch {
+  } catch (err: any) {
+    console.error("Silent Failure: File upload crashed:", err?.message || err);
     return null;
   }
 }
@@ -949,7 +944,13 @@ async function handleStreamingResponse(
             if (parsedCalls.length === 0) {
               // Malformed/unparseable tool call — discard silently, do NOT leak raw tags to chat
               // Log the raw buffer so we can analyze the exact DSML syntax it uses
-              fsLib.writeFileSync("C:\\RedSeek\\logs\\debug-dsml-failed.txt", toolCallBuffer, "utf-8");
+              try {
+                const _dsmlDir = process.env.REDSEEK_LOG_DIR ?? path.join(osLib.homedir(), ".redseek", "logs");
+                fsLib.mkdirSync(_dsmlDir, { recursive: true });
+                fsLib.writeFileSync(path.join(_dsmlDir, "debug-dsml-failed.txt"), toolCallBuffer, "utf-8");
+              } catch (err: any) {
+                console.error("Failed to write debug DSML:", err?.message || err);
+              }
               
               const hasToolMarkers = normalizedBuffer.includes("<｜｜DSML｜｜") ||
                 normalizedBuffer.includes("<tool_call>") ||

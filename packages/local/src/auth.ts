@@ -122,7 +122,8 @@ export async function refreshSession(stored: StoredCredentials): Promise<DeepSee
       userAgent,
       capturedAt: Date.now(),
     };
-  } catch {
+  } catch (err: any) {
+    console.error("Silent Failure: Playwright session refresh crashed:", err?.message || err);
     return null;
   } finally {
     if (browser) {
