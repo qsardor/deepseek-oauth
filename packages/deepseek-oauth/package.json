@@ -1,11 +1,12 @@
 {
-  "name": "deepseek-oauth",
+  "name": "redseek-proxy",
   "version": "0.1.0",
+  "description": "DeepSeek OAuth proxy server for RedSeek CLI. Handles authentication and proxies API requests.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "deepseek-oauth": "./dist/cli.js"
+    "redseek-proxy": "./dist/cli.js"
   },
   "exports": {
     ".": {
@@ -16,17 +17,33 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\""
+    "prepublishOnly": "npm run build",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "serve": "node dist/cli.js serve",
+    "login": "node dist/cli.js login"
   },
   "files": ["dist"],
+  "keywords": ["deepseek", "proxy", "oauth", "cli", "redseek", "ai"],
+  "author": "qsardor",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qsardor/redseek.git"
+  },
   "dependencies": {
     "@deepseek-oauth/core": "*",
     "@deepseek-oauth/local": "*",
     "yargs": "^17.7.2"
   },
+  "optionalDependencies": {
+    "playwright": "^1.62.0"
+  },
   "devDependencies": {
     "@types/node": "^26.1.1",
     "@types/yargs": "^17.0.33",
     "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
